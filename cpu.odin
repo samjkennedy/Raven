@@ -86,9 +86,9 @@ write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 	case 0xFF00 ..< 0xFF80:
 		{
 			_value := value
-			//DMA to OAM transfer
 			if address == 0xFF46 {
-				run_dma(this, _value)
+				//DMA to OAM transfer
+				run_dma_transfer(this, _value)
 			}
 
 			switch address {
@@ -114,6 +114,9 @@ write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 		}
 	case 0xC000 ..< 0xE000:
 		{
+			// if address >= 0xC000 && address < 0xC004 {
+			// 	fmt.printf("PC: %4x, Wrote %2x to %4x\n", this.pc, value, address)
+			// }
 			this.ram[address - 0xC000] = value
 			this.echoed_ram[address - 0xC000] = value
 		}
@@ -146,13 +149,13 @@ read_from_memory :: proc(this: ^CPU, address: u16) -> (value: u8) {
 		{
 			value = this.io_ports[address - 0xFF00]
 
-			if (address == 0xFF00) {
-				if (this.io_ports[0] & 0b00010000 > 0) {
-					value = get_joypad_state(.DIRECTION) //| 0b00010000
+			if (address == JOYPAD_ADDRESS) {
+				if (this.io_ports[0] & u8(Select.DIRECTION) > 0) {
+					value = get_joypad_state(.DIRECTION) | u8(Select.DIRECTION)
+				} else if (this.io_ports[0] & u8(Select.ACTION) > 0) {
+					value = get_joypad_state(.ACTION) | u8(Select.ACTION)
 				}
-				if (this.io_ports[0] & 0b00100000 > 0) {
-					value = get_joypad_state(.ACTION) //| 0b00100000
-				}
+				//fmt.printf("Read joypad state: %8b\n", value)
 			}
 		}
 	case 0xFEA0 ..< 0xFF00:
@@ -183,13 +186,18 @@ read_from_memory :: proc(this: ^CPU, address: u16) -> (value: u8) {
 	return
 }
 
-run_dma :: proc(this: ^CPU, value: u8) {
+run_dma_transfer :: proc(this: ^CPU, value: u8) {
 	source := u16(value) << 0x8
+	fmt.printf("Running DMA transfer from %4x\n", source)
+
 	for offset: u16 = 0; offset <= 0x9F; offset += 1 {
 
 		address := source + offset
-		sprite := read_from_memory(this, address)
-		write_to_memory(this, 0xFE00 + offset, sprite)
+		val := read_from_memory(this, address)
+
+		fmt.printf("Writing %2x from %4x to %4x\n", val, source, 0xFE00 + offset)
+
+		write_to_memory(this, 0xFE00 + offset, val)
 	}
 }
 
@@ -2231,8 +2239,141 @@ prefix_cb :: proc(this: ^CPU) {
 	case 0x7F:
 		bit(this, 7, Register.A)
 
+	case 0x80:
+		res(this, 0, Register.B)
+	case 0x81:
+		res(this, 0, Register.C)
+	case 0x82:
+		res(this, 0, Register.D)
+	case 0x83:
+		res(this, 0, Register.E)
+	case 0x84:
+		res(this, 0, Register.H)
+	case 0x85:
+		res(this, 0, Register.L)
+	case 0x86:
+		res(this, 0, Wide_Register.HL)
 	case 0x87:
-		res(this, 0, .A)
+		res(this, 0, Register.A)
+
+	case 0x88:
+		res(this, 1, Register.B)
+	case 0x89:
+		res(this, 1, Register.C)
+	case 0x8A:
+		res(this, 1, Register.D)
+	case 0x8B:
+		res(this, 1, Register.E)
+	case 0x8C:
+		res(this, 1, Register.H)
+	case 0x8D:
+		res(this, 1, Register.L)
+	case 0x8E:
+		res(this, 1, Wide_Register.HL)
+	case 0x8F:
+		res(this, 1, Register.A)
+
+	case 0x90:
+		res(this, 2, Register.B)
+	case 0x91:
+		res(this, 2, Register.C)
+	case 0x92:
+		res(this, 2, Register.D)
+	case 0x93:
+		res(this, 2, Register.E)
+	case 0x94:
+		res(this, 2, Register.H)
+	case 0x95:
+		res(this, 2, Register.L)
+	case 0x96:
+		res(this, 2, Wide_Register.HL)
+	case 0x97:
+		res(this, 2, Register.A)
+
+	case 0x98:
+		res(this, 3, Register.B)
+	case 0x99:
+		res(this, 3, Register.C)
+	case 0x9A:
+		res(this, 3, Register.D)
+	case 0x9B:
+		res(this, 3, Register.E)
+	case 0x9C:
+		res(this, 3, Register.H)
+	case 0x9D:
+		res(this, 3, Register.L)
+	case 0x9E:
+		res(this, 3, Wide_Register.HL)
+	case 0x9F:
+		res(this, 3, Register.A)
+
+	case 0xA0:
+		res(this, 4, Register.B)
+	case 0xA1:
+		res(this, 4, Register.C)
+	case 0xA2:
+		res(this, 4, Register.D)
+	case 0xA3:
+		res(this, 4, Register.E)
+	case 0xA4:
+		res(this, 4, Register.H)
+	case 0xA5:
+		res(this, 4, Register.L)
+	case 0xA6:
+		res(this, 4, Wide_Register.HL)
+	case 0xA7:
+		res(this, 4, Register.A)
+
+	case 0xA8:
+		res(this, 5, Register.B)
+	case 0xA9:
+		res(this, 5, Register.C)
+	case 0xAA:
+		res(this, 5, Register.D)
+	case 0xAB:
+		res(this, 5, Register.E)
+	case 0xAC:
+		res(this, 5, Register.H)
+	case 0xAD:
+		res(this, 5, Register.L)
+	case 0xAE:
+		res(this, 5, Wide_Register.HL)
+	case 0xAF:
+		res(this, 5, Register.A)
+
+	case 0xB0:
+		res(this, 6, Register.B)
+	case 0xB1:
+		res(this, 6, Register.C)
+	case 0xB2:
+		res(this, 6, Register.D)
+	case 0xB3:
+		res(this, 6, Register.E)
+	case 0xB4:
+		res(this, 6, Register.H)
+	case 0xB5:
+		res(this, 6, Register.L)
+	case 0xB6:
+		res(this, 6, Wide_Register.HL)
+	case 0xB7:
+		res(this, 6, Register.A)
+
+	case 0xB8:
+		res(this, 7, Register.B)
+	case 0xB9:
+		res(this, 7, Register.C)
+	case 0xBA:
+		res(this, 7, Register.D)
+	case 0xBB:
+		res(this, 7, Register.E)
+	case 0xBC:
+		res(this, 7, Register.H)
+	case 0xBD:
+		res(this, 7, Register.L)
+	case 0xBE:
+		res(this, 7, Wide_Register.HL)
+	case 0xBF:
+		res(this, 7, Register.A)
 
 	case 0xC0:
 		set_bit(this, 0, Register.B)
@@ -2384,7 +2525,7 @@ bit_narrow :: proc(this: ^CPU, bit: u8, register: Register) {
 
 	r := get_register(this, register)
 
-	b := r | 1 << bit
+	b := r & 1 << bit
 
 	set_flag(this, .Z, b == 0)
 	set_flag(this, .N, false)
@@ -2398,7 +2539,7 @@ bit_wide :: proc(this: ^CPU, bit: u8, register: Wide_Register) {
 	address := get_register(this, register)
 	r := read_from_memory(this, address)
 
-	b := r | 1 << bit
+	b := r & 1 << bit
 
 	set_flag(this, .Z, b == 0)
 	set_flag(this, .N, false)
@@ -2407,40 +2548,43 @@ bit_wide :: proc(this: ^CPU, bit: u8, register: Wide_Register) {
 	this.clock += 16
 }
 
-res :: proc(this: ^CPU, bit: u8, register: Register) {
+res :: proc {
+	res_narrow,
+	res_wide,
+}
+
+res_narrow :: proc(this: ^CPU, bit: u8, register: Register) {
 
 	switch register {
 	case .A:
-		{
-			this.AF &= ~(1 << (8 + bit))
-		}
+		this.AF &= ~(1 << (8 + bit))
 	case .B:
-		{
-			this.BC &= ~(1 << (8 + bit))
-		}
+		this.BC &= ~(1 << (8 + bit))
 	case .C:
-		{
-			this.BC &= ~(1 << bit)
-		}
+		this.BC &= ~(1 << bit)
 	case .D:
-		{
-			this.DE &= ~(1 << (8 + bit))
-		}
+		this.DE &= ~(1 << (8 + bit))
 	case .E:
-		{
-			this.DE &= ~(1 << bit)
-		}
+		this.DE &= ~(1 << bit)
 	case .H:
-		{
-			this.HL &= ~(1 << (8 + bit))
-		}
+		this.HL &= ~(1 << (8 + bit))
 	case .L:
-		{
-			this.HL &= ~(1 << bit)
-		}
+		this.HL &= ~(1 << bit)
 	}
 
 	this.clock += 8
+}
+
+res_wide :: proc(this: ^CPU, bit: u8, register: Wide_Register) {
+	address := get_register(this, register)
+
+	value := read_from_memory(this, address)
+
+	value &= ~(1 << bit)
+
+	write_to_memory(this, address, value)
+
+	this.clock += 16
 }
 
 rlc :: proc(this: ^CPU, register: Register) {
@@ -2457,7 +2601,7 @@ rlc :: proc(this: ^CPU, register: Register) {
 	set_flag(this, .H, false)
 	set_flag(this, .C, msb > 0)
 
-	this.clock += 9
+	this.clock += 8
 }
 
 rrc :: proc(this: ^CPU, register: Register) {
@@ -2474,7 +2618,7 @@ rrc :: proc(this: ^CPU, register: Register) {
 	set_flag(this, .H, false)
 	set_flag(this, .C, lsb > 0)
 
-	this.clock += 9
+	this.clock += 8
 }
 
 rl :: proc {

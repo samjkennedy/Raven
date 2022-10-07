@@ -9,6 +9,7 @@ import "core:strings"
 import "core:log"
 
 Emulator :: struct {
+	title:           string,
 	window:          ^sdl2.Window,
 	renderer:        ^sdl2.Renderer,
 	pause_execution: bool,
@@ -17,7 +18,7 @@ Emulator :: struct {
 
 WIDTH :: i32(160)
 HEIGHT :: i32(144)
-SCALE :: i32(5)
+SCALE :: i32(2)
 
 init_window :: proc(emulator: ^Emulator) -> bool { 	//TODO: Return window handle
 	WINDOW_WIDTH :: WIDTH * SCALE
@@ -75,6 +76,9 @@ run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 				}
 			}
 			if !emulator.pause_execution {
+				if debugger.enable_debugging {
+					debug(debugger, &cpu)
+				}
 				if ok := run_instruction(&cpu); !ok {
 					fmt.printf("Execution failed just before %4x\n", cpu.pc)
 					return false
@@ -168,12 +172,19 @@ main :: proc() {
 	//TODO: Maybe move the sdl2 stuff out of emulator?
 	ppu := init_ppu(emulator.window, emulator.renderer)
 
+	emulator.title = strings.trim_right_null(cart.header.title)
 	emulator.cpu = cpu
+	sdl2.SetWindowTitle(
+		emulator.window,
+		strings.unsafe_string_to_cstring(fmt.aprintf("Raven - %v", emulator.title)),
+	)
 
 	//Debug window
 	debugger := Debugger{}
 	debugger.emulator = &emulator
 	debugger.break_points = make([dynamic]u16, 0, 1024)
+
+	//append(&debugger.break_points, 0x04A2) //handling input
 
 	run(&emulator, &ppu, &debugger)
 }

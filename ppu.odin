@@ -10,6 +10,8 @@ import "core:time"
 //     pixels: [][]Color
 // }
 
+SCY :: 0xFF42
+SCX :: 0xFF43
 
 //TODO: Implement proper HBLANK/VBLANK and scanline rendering, not just rendering all in one go
 
@@ -140,21 +142,16 @@ step_ppu_clock :: proc(this: ^PPU, cpu: ^CPU, cycles: u64) {
 			set_interrupt_flag(cpu, .VBLANK, 1)
 			write_to_memory(cpu, 0xFF85, 1) //Tetris hack
 
-		} else if current_line == 154 { 	//Did we just finish a frame?
+		} else if current_line == 153 { 	//Did we just finish a frame?
 
 			write_to_memory(cpu, 0xFF44, 0)
 			draw_frame(this, cpu)
-
 
 			time_since_last_frame_ms := time.duration_milliseconds(
 				time.tick_since(last_frame_time),
 			)
 			fps := MS_PER_S / time_since_last_frame_ms
-			//strings.trim_right_null(emulator.cpu.cart.header.title)
-			sdl2.SetWindowTitle(
-				this.window,
-				strings.unsafe_string_to_cstring(fmt.aprintf("Raven: %.0f FPS", fps)),
-			)
+
 			last_frame_time = time.tick_now()
 		}
 	}
@@ -168,7 +165,7 @@ draw_scanline :: proc(this: ^PPU, cpu: ^CPU) {
 draw_frame :: proc(this: ^PPU, cpu: ^CPU) {
 
 	buffer = build_frame(this, cpu)
-	visible_frame := apply_scroll(this)
+	visible_frame := apply_scroll(this, cpu)
 
 	sdl2.UpdateTexture(this.texture, nil, raw_data(&visible_frame), WIDTH * 4)
 
@@ -181,15 +178,28 @@ draw_frame :: proc(this: ^PPU, cpu: ^CPU) {
 	sdl2.RenderPresent(this.renderer)
 }
 
+LCDC_REGISTER :: 0xFF40
+
+Addressing_Mode :: enum {
+	Addressing_8000,
+	Addressing_9000,
+}
+
 build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [256 * 256]u32) {
 
-	tile_id := 0
 	//Background
+
+	//Work out addressing method
+	lcdc := read_from_memory(cpu, LCDC_REGISTER)
+	addressing_mode :=
+		read_bit(lcdc, 4) ? Addressing_Mode.Addressing_8000 : Addressing_Mode.Addressing_9000
+
+	tile_id := 0
 	for address in 0x9800 ..< 0x9BFF {
 
 		tile_idx := read_from_memory(cpu, u16(address))
 
-		tile := get_tile(this, cpu, tile_idx, tile_id)
+		tile := get_tile(this, cpu, tile_idx, tile_id, addressing_mode)
 
 		tile_x := i32(tile_id % 0x20) * 0x08
 		tile_y := i32(tile_id / 0x20) * 0x08
@@ -228,21 +238,23 @@ build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [256 * 256]u32) {
 
 				//Bad hack to not overwrite with transparent pixels
 				if (sprite[x][y] & 0x000F > 0) {
-					pixels[pixel_x + pixel_y * 256] = sprite[x][y]
+					pixel_idx := pixel_x + pixel_y * 256
+					if pixel_idx > 65536 { 	//Just in case
+						continue
+					}
+					pixels[pixel_idx] = sprite[x][y]
 				}
 			}
 		}
-
 		sprite_id = sprite_id + 1
 	}
 	return
 }
 
-apply_scroll :: proc(this: ^PPU) -> (pixels: [160 * 144]u32) {
+apply_scroll :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [160 * 144]u32) {
 
-	//TODO: Actually get the scrollx and scrolly
-	scroll_x := 0
-	scroll_y := 0
+	scroll_y := int(read_from_memory(cpu, SCY))
+	scroll_x := int(read_from_memory(cpu, SCX))
 
 	for x := 0; x < 160; x += 1 {
 		for y := 0; y < 144; y += 1 {
@@ -252,9 +264,23 @@ apply_scroll :: proc(this: ^PPU) -> (pixels: [160 * 144]u32) {
 	return
 }
 
-get_tile :: proc(this: ^PPU, cpu: ^CPU, tile_idx: u8, tile_id: int) -> (tile: [8][8]u32) {
+get_tile :: proc(
+	this: ^PPU,
+	cpu: ^CPU,
+	tile_idx: u8,
+	tile_id: int,
+	addressing_mode: Addressing_Mode,
+) -> (
+	tile: [8][8]u32,
+) {
 
-	root_address := u16(0x8000) + u16(tile_idx) * 0x10
+	root_address: u16
+	switch addressing_mode {
+	case .Addressing_8000:
+		root_address = u16(0x8000) + u16(tile_idx) * 0x10
+	case .Addressing_9000:
+		root_address = u16(0x9000) + u16(i8(tile_idx)) * 0x10
+	}
 
 	pixel_x := 0
 	pixel_y := 0

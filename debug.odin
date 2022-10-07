@@ -258,7 +258,7 @@ lookup :: proc(ins: [3]u8, cpu: ^CPU) -> (op: string) {
         case 0xA4: return "AND A, H"
         case 0xA5: return "AND A, L"
         case 0xA6: return "AND A, (HL)"
-        case 0xA7: return "XOR A, A"
+        case 0xA7: return "AND A, A"
         case 0xA8: return "XOR A, B"
         case 0xA9: return "XOR A, C"
         case 0xAA: return "XOR A, D"
