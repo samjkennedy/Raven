@@ -99,7 +99,6 @@ write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 					_value |= (this.io_ports[0] & 0x0F)
 				}
 			}
-
 			this.io_ports[address - 0xFF00] = _value
 		}
 	case 0xFEA0 ..< 0xFF00:
@@ -148,14 +147,12 @@ read_from_memory :: proc(this: ^CPU, address: u16) -> (value: u8) {
 			value = this.io_ports[address - 0xFF00]
 
 			if (address == 0xFF00) {
-				//TODO: check what we're reading
 				if (this.io_ports[0] & 0b00010000 > 0) {
-					value = get_joypad_state(.DIRECTION)
+					value = get_joypad_state(.DIRECTION) //| 0b00010000
 				}
 				if (this.io_ports[0] & 0b00100000 > 0) {
-					value = get_joypad_state(.ACTION)
+					value = get_joypad_state(.ACTION) //| 0b00100000
 				}
-				//fmt.printf("Reading joypad, value is %8b\n", value)
 			}
 		}
 	case 0xFEA0 ..< 0xFF00:
@@ -187,7 +184,6 @@ read_from_memory :: proc(this: ^CPU, address: u16) -> (value: u8) {
 }
 
 run_dma :: proc(this: ^CPU, value: u8) {
-	fmt.println("Triggered dma transfer")
 	source := u16(value) << 0x8
 	for offset: u16 = 0; offset <= 0x9F; offset += 1 {
 
@@ -210,7 +206,6 @@ interrupt_enabled :: proc(this: ^CPU, interrupt: Interrupt) -> bool {
 }
 
 set_interrupt_flag :: proc(this: ^CPU, interrupt: Interrupt, value: u8) {
-	fmt.printf("Setting interrupt flag %v\n", interrupt)
 	interrupt_flags := read_from_memory(this, IF_REGISTER)
 
 	if (value > 0) {
@@ -1054,8 +1049,6 @@ run_instruction :: proc(this: ^CPU) -> (ok: bool) {
 	//Check for interrupts
 	//Interrupts must be handled in the order they appear in the Interrupt struct
 	if get_interrupt_flag(this, .VBLANK) && interrupt_enabled(this, .VBLANK) {
-
-		fmt.println("VBLANK INTERRUPT")
 
 		this.in_interrupt = true
 

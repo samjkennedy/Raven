@@ -3,6 +3,8 @@ package raven
 import "vendor:sdl2"
 
 import "core:fmt"
+import "core:strings"
+import "core:time"
 
 // tile :: struct {
 //     pixels: [][]Color
@@ -12,11 +14,18 @@ import "core:fmt"
 //TODO: Implement proper HBLANK/VBLANK and scanline rendering, not just rendering all in one go
 
 PPU :: struct {
+	//sdl
 	window:   ^sdl2.Window,
 	renderer: ^sdl2.Renderer,
 	texture:  ^sdl2.Texture,
+	//internals
 	palette:  Palette,
+	x:        u8,
+	y:        u8,
 }
+
+//So as to not be passing this thicc lad around
+buffer: [256 * 256]u32
 
 Color :: struct {
 	r: u8,
@@ -94,19 +103,75 @@ init_ppu :: proc(window: ^sdl2.Window, renderer: ^sdl2.Renderer) -> PPU {
 	//RGBA8888    = 1<<28 | PIXELTYPE_PACKED32<<24 | PACKEDORDER_RGBA<<20 | PACKEDLAYOUT_8888<<16 | 32<<8 | 4<<0,
 	format := 1 << 28 | 6 << 24 | 2 << 20 | 6 << 16 | 32 << 8 | 4 << 0
 
-	texture := sdl2.CreateTexture(renderer, u32(format), .STREAMING, 256, 256)
+	texture := sdl2.CreateTexture(renderer, u32(format), .STREAMING, WIDTH, HEIGHT)
 
-	return PPU{window, renderer, texture, kirokaze_gameboy_palette}
+	//return PPU{window, renderer, texture, lava_gb_palette, make([]u8, 256 * 256), 0, 0}
+
+	ppu := PPU{}
+	ppu.window = window
+	ppu.renderer = renderer
+	ppu.texture = texture
+	ppu.palette = default_palette
+
+	buffer = {}
+	last_frame_time = time.tick_now()
+
+	return ppu
+}
+
+DOTS_PER_SCANLINE :: 456
+scanline_counter: i16 = DOTS_PER_SCANLINE
+
+last_frame_time: time.Tick
+
+step_ppu_clock :: proc(this: ^PPU, cpu: ^CPU, cycles: u64) {
+
+	scanline_counter -= i16(cycles)
+
+	current_line := read_from_memory(cpu, 0xFF44)
+
+	if scanline_counter <= 0 {
+		write_to_memory(cpu, 0xFF44, current_line + 1)
+
+		scanline_counter = DOTS_PER_SCANLINE //Reset counter
+
+		if (current_line == 144) { 	//are we in VBLANK?
+
+			set_interrupt_flag(cpu, .VBLANK, 1)
+			write_to_memory(cpu, 0xFF85, 1) //Tetris hack
+
+		} else if current_line == 154 { 	//Did we just finish a frame?
+
+			write_to_memory(cpu, 0xFF44, 0)
+			draw_frame(this, cpu)
+
+
+			time_since_last_frame_ms := time.duration_milliseconds(
+				time.tick_since(last_frame_time),
+			)
+			fps := MS_PER_S / time_since_last_frame_ms
+			//strings.trim_right_null(emulator.cpu.cart.header.title)
+			sdl2.SetWindowTitle(
+				this.window,
+				strings.unsafe_string_to_cstring(fmt.aprintf("Raven: %.0f FPS", fps)),
+			)
+			last_frame_time = time.tick_now()
+		}
+	}
+}
+
+draw_scanline :: proc(this: ^PPU, cpu: ^CPU) {
+
+	//TODO: This is the better way to do sprites but for now write all in one go
 }
 
 draw_frame :: proc(this: ^PPU, cpu: ^CPU) {
 
-	//TODO: Need to be pushing pixels constantly, this method should just display them to sdl2
-	pixels := build_frame(this, cpu)
+	buffer = build_frame(this, cpu)
+	visible_frame := apply_scroll(this)
 
-	sdl2.UpdateTexture(this.texture, nil, raw_data(&pixels), WIDTH * 4)
+	sdl2.UpdateTexture(this.texture, nil, raw_data(&visible_frame), WIDTH * 4)
 
-	//TODO: Scrolling
 	sdl2.RenderCopy(
 		this.renderer,
 		this.texture,
@@ -116,7 +181,7 @@ draw_frame :: proc(this: ^PPU, cpu: ^CPU) {
 	sdl2.RenderPresent(this.renderer)
 }
 
-build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [WIDTH * HEIGHT]u32) {
+build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [256 * 256]u32) {
 
 	tile_id := 0
 	//Background
@@ -129,19 +194,13 @@ build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [WIDTH * HEIGHT]u32) {
 		tile_x := i32(tile_id % 0x20) * 0x08
 		tile_y := i32(tile_id / 0x20) * 0x08
 
-		//TODO: This is a hack, figure out how to crop
-		if (tile_x >= WIDTH || tile_y >= HEIGHT) {
-			tile_id = tile_id + 1
-			continue
-		}
-
 		for x: i32 = 0; x < 8; x += 1 {
 			for y: i32 = 0; y < 8; y += 1 {
 
 				pixel_x := tile_x + x
 				pixel_y := tile_y + y
 
-				pixels[pixel_x + pixel_y * WIDTH] = tile[x][y]
+				pixels[pixel_x + pixel_y * 256] = tile[x][y]
 			}
 		}
 
@@ -159,12 +218,6 @@ build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [WIDTH * HEIGHT]u32) {
 
 		sprite := get_sprite(this, cpu, sprite_idx)
 
-		//TODO: This is a hack, figure out how to crop
-		if (i32(sprite_x) >= WIDTH || i32(sprite_y) >= HEIGHT) {
-			sprite_id = sprite_id + 1
-			continue
-		}
-
 		//TODO: Attributes
 
 		for x: i32 = 0; x < 8; x += 1 {
@@ -173,19 +226,28 @@ build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [WIDTH * HEIGHT]u32) {
 				pixel_x := i32(sprite_x) + x
 				pixel_y := i32(sprite_y) + y
 
-				//TODO: This is a hack, figure out how to crop
-				if pixel_x + pixel_y * WIDTH > WIDTH * HEIGHT {
-					sprite_id = sprite_id + 1
-					continue
-				}
-
-				if (sprite[x][y] & 0x000F > 0) { 	//Bad hack to not overwrite with transparent pixels
-					pixels[pixel_x + pixel_y * WIDTH] = sprite[x][y]
+				//Bad hack to not overwrite with transparent pixels
+				if (sprite[x][y] & 0x000F > 0) {
+					pixels[pixel_x + pixel_y * 256] = sprite[x][y]
 				}
 			}
 		}
 
 		sprite_id = sprite_id + 1
+	}
+	return
+}
+
+apply_scroll :: proc(this: ^PPU) -> (pixels: [160 * 144]u32) {
+
+	//TODO: Actually get the scrollx and scrolly
+	scroll_x := 0
+	scroll_y := 0
+
+	for x := 0; x < 160; x += 1 {
+		for y := 0; y < 144; y += 1 {
+			pixels[x + y * 160] = buffer[x + scroll_x + (y + scroll_y) * 256]
+		}
 	}
 	return
 }
@@ -225,13 +287,6 @@ get_tile :: proc(this: ^PPU, cpu: ^CPU, tile_idx: u8, tile_id: int) -> (tile: [8
 	}
 
 	return
-}
-
-Sprite :: struct {
-	y_position: u8,
-	x_position: u8,
-	index:      u8,
-	attributes: u8, //TODO: Maybe preparse these?
 }
 
 get_sprite :: proc(this: ^PPU, cpu: ^CPU, sprite_idx: u8) -> (sprite: [8][8]u32) {

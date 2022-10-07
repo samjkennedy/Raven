@@ -33,14 +33,14 @@ Action_Button :: enum u8 {
 	A      = 0,
 }
 
-get_joypad_state :: proc(select: Select) -> u8 {
+get_joypad_state :: proc(select: Select) -> (state: u8) {
 	switch select {
 	case .ACTION:
-		return joypad_state.action_buttons & ~(u8(1) << u8(Select.ACTION))
+		state = joypad_state.action_buttons & ~(u8(1) << u8(Select.ACTION))
 	case .DIRECTION:
-		return joypad_state.direction_buttons & ~(u8(1) << u8(Select.DIRECTION))
+		state = joypad_state.direction_buttons & ~(u8(1) << u8(Select.DIRECTION))
 	}
-	return 0
+	return
 }
 
 set_joypad_bit :: proc {
@@ -54,7 +54,7 @@ set_joypad_bit_dir :: proc(button: Direction_Button, value: bool) {
 	} else {
 		joypad_state.direction_buttons &= ~(1 << u8(button))
 	}
-	fmt.printf("%8b\n", joypad_state.direction_buttons)
+	//fmt.printf("%8b\n", joypad_state.direction_buttons)
 }
 
 set_joypad_bit_act :: proc(button: Action_Button, value: bool) {
@@ -63,7 +63,7 @@ set_joypad_bit_act :: proc(button: Action_Button, value: bool) {
 	} else {
 		joypad_state.action_buttons &= ~(1 << u8(button))
 	}
-	fmt.printf("%8b\n", joypad_state.action_buttons)
+	//fmt.printf("%8b\n", joypad_state.action_buttons)
 }
 
 handle_button :: proc {
@@ -78,7 +78,7 @@ handle_button_dir :: proc(button: Direction_Button, cpu: ^CPU, released: bool) {
 
 	if released || !already_pressed {
 		set_joypad_bit(button, released)
-		fmt.printf("Button %v was %v\n", button, released ? "released" : "pressed")
+		//fmt.printf("Button %v was %v\n", button, released ? "released" : "pressed")
 	}
 
 	if !released && (joypad_ram & u8(Select.DIRECTION) > 0) && !already_pressed {
@@ -93,7 +93,7 @@ handle_button_act :: proc(button: Action_Button, cpu: ^CPU, released: bool) {
 
 	if released || !already_pressed {
 		set_joypad_bit(button, released)
-		fmt.printf("Button %v was %v\n", button, released ? "released" : "pressed")
+		//fmt.printf("Button %v was %v\n", button, released ? "released" : "pressed")
 	}
 
 	if !released && (joypad_ram & u8(Select.ACTION) > 0) && !already_pressed {

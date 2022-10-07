@@ -15,8 +15,6 @@ Emulator :: struct {
 	cpu:             CPU,
 }
 
-//======PPU/Screen======//
-
 WIDTH :: i32(160)
 HEIGHT :: i32(144)
 SCALE :: i32(5)
@@ -50,28 +48,22 @@ init_window :: proc(emulator: ^Emulator) -> bool { 	//TODO: Return window handle
 	return true
 }
 
+DELAY_THRESHOLD_MS :: 16
+
 run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 
 	e: sdl2.Event
 
 	cpu := emulator.cpu
 
-	target_fps :: 59.727500569606 //TODO: use clock cycles over this
-	ms_per_frame := 1000.0 / target_fps
-
-	//TODO: Replace with boot program to show the Nintendo logo
-	draw_frame(ppu, &cpu)
+	ns_per_clock: i64 : 239
 
 	previous_clock: u64 = 0
+	accumulated_delay_ns: NS = 0
 
-	tick := time.tick_now()
 	for {
-		//CPU
-		before := time.tick_now()
-
-		if (!emulator.pause_execution) {
-			debug(debugger, &cpu)
-		}
+		time_before := time.tick_now()
+		clocks_before := cpu.clock
 
 		if !emulator.pause_execution {
 			for break_point in debugger.break_points {
@@ -84,53 +76,31 @@ run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 			}
 			if !emulator.pause_execution {
 				if ok := run_instruction(&cpu); !ok {
-					//dump CPU to file?
 					fmt.printf("Execution failed just before %4x\n", cpu.pc)
 					return false
 				}
 			}
 		}
-		clock_time := time.duration_nanoseconds(time.tick_since(before))
 
-		//TODO: move to PPU?
-		current_clock := cpu.clock
-		if (current_clock - previous_clock >= 70224) {
-			//draw_vram(debugger, &cpu)
+		clock_cycles_elapsed := cpu.clock - clocks_before
+		step_ppu_clock(ppu, &cpu, clock_cycles_elapsed)
 
-			LY := read_from_memory(&cpu, 0xFF44)
-			if (LY == 144) {
-				//VBLANK
-				set_interrupt_flag(&cpu, .VBLANK, 1)
+		actual_clock_time_ns := time.duration_nanoseconds(time.tick_since(time_before))
+		expected_clock_time_ns := NS(clock_cycles_elapsed) * ns_per_clock
 
-				write_to_memory(&cpu, 0xFF41, 0x01)
+		if (actual_clock_time_ns < expected_clock_time_ns) {
+			accumulated_delay_ns += expected_clock_time_ns - actual_clock_time_ns
+		} else {
+			accumulated_delay_ns -= actual_clock_time_ns - expected_clock_time_ns
+		}
+
+		//We can only delay with ms precision, so accumulate the delay until we hit the threshold
+		if accumulated_delay_ns >= NS_PER_MS * DELAY_THRESHOLD_MS {
+			delay_ms := accumulated_delay_ns / NS_PER_MS
+			if (delay_ms > 0) {
+				sdl2.Delay(u32(delay_ms))
+				accumulated_delay_ns = 0
 			}
-			if (LY == 153) {
-				draw_frame(ppu, &cpu)
-				write_to_memory(&cpu, 0xFF44, 0)
-			} else {
-				write_to_memory(&cpu, 0xFF44, LY + 1)
-			}
-
-			//Tetris hack
-			write_to_memory(&cpu, 0xFF85, 1)
-			previous_clock = current_clock
-
-			delta_time := time.duration_milliseconds(time.tick_since(tick))
-
-			time_to_delay := ms_per_frame - delta_time
-			if (time_to_delay > 0) {
-				sdl2.Delay(u32(time_to_delay))
-			}
-
-			fps := 1000.0 / time.duration_milliseconds(time.tick_since(tick))
-
-			//strings.trim_right_null(emulator.cpu.cart.header.title)
-			sdl2.SetWindowTitle(
-				ppu.window,
-				strings.unsafe_string_to_cstring(fmt.aprintf("Raven: %.0f FPS", fps)),
-			)
-
-			tick = time.tick_now()
 		}
 
 		for sdl2.PollEvent(&e) {
@@ -173,8 +143,6 @@ run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 	return true
 }
 
-//======Emu======//
-
 main :: proc() {
 
 	args := os.args
@@ -206,18 +174,6 @@ main :: proc() {
 	debugger := Debugger{}
 	debugger.emulator = &emulator
 	debugger.break_points = make([dynamic]u16, 0, 1024)
-	debugger.enable_debugging = false
-
-	//append(&debugger.break_points, 0x03F9) //Begin writing into RAM for the OAM transfer
-	// append(&debugger.break_points, 0x017E) //beginning of call block
-	// append(&debugger.break_points, 0x0185) //beginning of call block
-	// append(&debugger.break_points, 0x0197) //beginning of call block
-	// append(&debugger.break_points, 0x01D5) //call to OAM transfer
-	// append(&debugger.break_points, 0xFFB8) //OAM transfer
-
-	//init_vram_window(&debugger)
-
-	emulator.pause_execution = false
 
 	run(&emulator, &ppu, &debugger)
 }
