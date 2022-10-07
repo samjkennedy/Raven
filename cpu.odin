@@ -114,9 +114,6 @@ write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 		}
 	case 0xC000 ..< 0xE000:
 		{
-			// if address >= 0xC000 && address < 0xC004 {
-			// 	fmt.printf("PC: %4x, Wrote %2x to %4x\n", this.pc, value, address)
-			// }
 			this.ram[address - 0xC000] = value
 			this.echoed_ram[address - 0xC000] = value
 		}
@@ -195,7 +192,7 @@ run_dma_transfer :: proc(this: ^CPU, value: u8) {
 		address := source + offset
 		val := read_from_memory(this, address)
 
-		fmt.printf("Writing %2x from %4x to %4x\n", val, source, 0xFE00 + offset)
+		//fmt.printf("Writing %2x from %4x to %4x\n", val, source, 0xFE00 + offset)
 
 		write_to_memory(this, 0xFE00 + offset, val)
 	}

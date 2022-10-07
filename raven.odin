@@ -184,7 +184,7 @@ main :: proc() {
 	debugger.emulator = &emulator
 	debugger.break_points = make([dynamic]u16, 0, 1024)
 
-	//append(&debugger.break_points, 0x04A2) //handling input
+	append(&debugger.break_points, 0xFFB6) //dma
 
 	run(&emulator, &ppu, &debugger)
 }
