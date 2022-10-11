@@ -62,6 +62,8 @@ run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 	previous_clock: u64 = 0
 	accumulated_delay_ns: NS = 0
 
+	write_to_memory(&cpu, LCDC_REGISTER, 0x85) //Post boot state
+
 	for {
 		time_before := time.tick_now()
 		clocks_before := cpu.clock
@@ -81,6 +83,8 @@ run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 				}
 				if ok := run_instruction(&cpu); !ok {
 					fmt.printf("Execution failed just before %4x\n", cpu.pc)
+					debugger.enable_debugging = true
+					debug(debugger, &cpu)
 					return false
 				}
 			}
@@ -105,6 +109,7 @@ run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 				sdl2.Delay(u32(delay_ms))
 				accumulated_delay_ns = 0
 			}
+			draw_vram(debugger, &cpu)
 		}
 
 		for sdl2.PollEvent(&e) {
@@ -147,6 +152,10 @@ run :: proc(emulator: ^Emulator, ppu: ^PPU, debugger: ^Debugger) -> bool {
 	return true
 }
 
+reset :: proc(cpu: ^CPU) {
+	cpu.pc = 0x100
+}
+
 main :: proc() {
 
 	args := os.args
@@ -183,8 +192,13 @@ main :: proc() {
 	debugger := Debugger{}
 	debugger.emulator = &emulator
 	debugger.break_points = make([dynamic]u16, 0, 1024)
+	// debugger.enable_debugging = true
+	// emulator.pause_execution = true
 
-	append(&debugger.break_points, 0xFFB6) //dma
+	//init_vram_window(&debugger)
+
+	//append(&debugger.break_points, 0xc051) //Write to FF80
+	//append(&debugger.break_points, 0xc05a) //Test 04 last progress
 
 	run(&emulator, &ppu, &debugger)
 }

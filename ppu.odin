@@ -6,14 +6,8 @@ import "core:fmt"
 import "core:strings"
 import "core:time"
 
-// tile :: struct {
-//     pixels: [][]Color
-// }
-
 SCY :: 0xFF42
 SCX :: 0xFF43
-
-//TODO: Implement proper HBLANK/VBLANK and scanline rendering, not just rendering all in one go
 
 PPU :: struct {
 	//sdl
@@ -22,8 +16,6 @@ PPU :: struct {
 	texture:  ^sdl2.Texture,
 	//internals
 	palette:  Palette,
-	x:        u8,
-	y:        u8,
 }
 
 //So as to not be passing this thicc lad around
@@ -107,8 +99,6 @@ init_ppu :: proc(window: ^sdl2.Window, renderer: ^sdl2.Renderer) -> PPU {
 
 	texture := sdl2.CreateTexture(renderer, u32(format), .STREAMING, WIDTH, HEIGHT)
 
-	//return PPU{window, renderer, texture, lava_gb_palette, make([]u8, 256 * 256), 0, 0}
-
 	ppu := PPU{}
 	ppu.window = window
 	ppu.renderer = renderer
@@ -122,20 +112,22 @@ init_ppu :: proc(window: ^sdl2.Window, renderer: ^sdl2.Renderer) -> PPU {
 }
 
 DOTS_PER_SCANLINE :: 456
-scanline_counter: i16 = DOTS_PER_SCANLINE
+dots_remaining: i16 = DOTS_PER_SCANLINE
+dots_in_current_mode: i16 = 0
 
 last_frame_time: time.Tick
 
 step_ppu_clock :: proc(this: ^PPU, cpu: ^CPU, cycles: u64) {
 
-	scanline_counter -= i16(cycles)
+	dots_remaining -= i16(cycles)
+	dots_in_current_mode += i16(cycles)
 
 	current_line := read_from_memory(cpu, 0xFF44)
 
-	if scanline_counter <= 0 {
+	if dots_remaining <= 0 {
 		write_to_memory(cpu, 0xFF44, current_line + 1)
 
-		scanline_counter = DOTS_PER_SCANLINE //Reset counter
+		dots_remaining = DOTS_PER_SCANLINE //Reset counter
 
 		if (current_line == 144) { 	//are we in VBLANK?
 
@@ -155,6 +147,58 @@ step_ppu_clock :: proc(this: ^PPU, cpu: ^CPU, cycles: u64) {
 			last_frame_time = time.tick_now()
 		}
 	}
+
+	scanline := read_from_memory(cpu, 0xFF44)
+	set_lcd_status(cpu, scanline)
+}
+
+STAT_REGISTER :: 0xFF41
+LYC_REGISTER :: 0xFF45
+
+Stat_Bits :: enum u8 {
+	LYC_LY_STAT_Interrupt     = 6,
+	Mode_2_OAM_STAT_Interrupt = 5,
+	Mode_1_VBlank_Interrupt   = 4,
+	Mode_0_HBlank_Interrupt   = 3,
+	LYC_LY_Flag               = 2,
+}
+
+set_lcd_status :: proc(cpu: ^CPU, scanline: u8) {
+
+	stat := read_from_memory(cpu, STAT_REGISTER)
+	lyc := read_from_memory(cpu, LYC_REGISTER)
+
+	//LYC = LY Flag
+	if lyc == scanline {
+		stat = set_bit(stat, u8(Stat_Bits.LYC_LY_Flag))
+		write_to_memory(cpu, STAT_REGISTER, stat)
+
+		if read_bit(stat, u8(Stat_Bits.LYC_LY_STAT_Interrupt)) {
+			//LYC = LY interrupt
+			set_interrupt_flag(cpu, .LCD_STAT, 1)
+		}
+	} else {
+		stat = set_bit(stat, u8(Stat_Bits.LYC_LY_Flag), false)
+		write_to_memory(cpu, STAT_REGISTER, stat)
+	}
+
+	//Mode flag
+	mode: u8 = read_from_memory(cpu, STAT_REGISTER) & 3 //Select only the mode bits
+	if scanline >= 144 && scanline <= 153 { 	//VBLANK
+
+		mode = 0b00000001
+		//Set manually by ppu
+		cpu.io_ports[41] = cpu.io_ports[41] | mode
+	} else {
+		switch mode {
+		case 0:
+		case 1:
+		case 2:
+		case 3:
+		}
+	}
+
+	// fmt.printf("LCD STAT Mode: %8b\n", mode)
 }
 
 draw_scanline :: proc(this: ^PPU, cpu: ^CPU) {
@@ -238,10 +282,7 @@ build_frame :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [256 * 256]u32) {
 
 				//Bad hack to not overwrite with transparent pixels
 				if (sprite[x][y] & 0x000F > 0) {
-					pixel_idx := pixel_x + pixel_y * 256
-					if pixel_idx > 65536 { 	//Just in case
-						continue
-					}
+					pixel_idx := u16(pixel_x + pixel_y * 256)
 					pixels[pixel_idx] = sprite[x][y]
 				}
 			}
@@ -258,7 +299,8 @@ apply_scroll :: proc(this: ^PPU, cpu: ^CPU) -> (pixels: [160 * 144]u32) {
 
 	for x := 0; x < 160; x += 1 {
 		for y := 0; y < 144; y += 1 {
-			pixels[x + y * 160] = buffer[x + scroll_x + (y + scroll_y) * 256]
+			buffer_idx := u16(x + scroll_x + (y + scroll_y) * 256)
+			pixels[x + y * 160] = buffer[buffer_idx]
 		}
 	}
 	return

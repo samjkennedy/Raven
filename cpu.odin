@@ -36,6 +36,10 @@ CPU :: struct {
 	cart:         ^Cart, //0000-4000/8000
 	in_interrupt: bool,
 
+	//State
+	is_halted:    bool,
+	is_stopped:   bool,
+
 	//Debugging
 	ins_pc:       u16,
 	ins_idx:      u8,
@@ -44,21 +48,30 @@ CPU :: struct {
 
 init_cpu :: proc(cart: ^Cart) -> (cpu: CPU) {
 	cpu = CPU{}
+	cpu.cart = cart
+
+	//state after boot
+	set_register(&cpu, Wide_Register.AF, 0x01B0)
+	set_register(&cpu, Wide_Register.BC, 0x0013)
+	set_register(&cpu, Wide_Register.DE, 0x00D8)
+	set_register(&cpu, Wide_Register.HL, 0x014D)
 
 	cpu.pc = 0x0100
 	cpu.sp = 0xFFFE
-	cpu.cart = cart
-
-	//Set joypad byte to all unpressed
-	cpu.io_ports[0] = 0x0F
 
 	return
 }
 
 //Special Registers
 
-IE_REGISTER: u16 = 0xFFFF
-IF_REGISTER: u16 = 0xFF0F
+IE_REGISTER: u16 : 0xFFFF
+IF_REGISTER: u16 : 0xFF0F
+
+DIV_REGISTER: u16 : 0xFF04
+TIMA_REGISTER: u16 : 0xFF05
+TMA_MOD_REGISTER: u16 : 0xFF06
+TAC_REGISTER: u16 : 0xFF07
+
 
 //=====Memory Bus=====//
 
@@ -78,6 +91,31 @@ write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 	case IF_REGISTER:
 		{
 			//Shouldn't be written to manually
+		}
+	case STAT_REGISTER:
+		{
+			_value := value
+			//bits 0 and 1 are readonly
+			_value &= 0b11111100
+			_value |= (read_from_memory(this, STAT_REGISTER) & 0b11111100)
+
+			this.io_ports[41] = _value
+		}
+	case DIV_REGISTER:
+		this.io_ports[4] = 0x00
+	case TAC_REGISTER:
+		{
+			clock_select := value & 0b00000011
+			switch clock_select {
+			case 0:
+				timer_speed = 1024
+			case 1:
+				timer_speed = 16
+			case 2:
+				timer_speed = 64
+			case 3:
+				timer_speed = 256
+			}
 		}
 	case 0xFF80 ..< 0xFFFF:
 		{
@@ -185,7 +223,6 @@ read_from_memory :: proc(this: ^CPU, address: u16) -> (value: u8) {
 
 run_dma_transfer :: proc(this: ^CPU, value: u8) {
 	source := u16(value) << 0x8
-	fmt.printf("Running DMA transfer from %4x\n", source)
 
 	for offset: u16 = 0; offset <= 0x9F; offset += 1 {
 
@@ -295,7 +332,7 @@ get_wide_register :: proc(this: ^CPU, register: Wide_Register) -> u16 {
 set_wide_register :: proc(this: ^CPU, register: Wide_Register, value: u16) {
 	switch register {
 	case .AF:
-		this.AF = value
+		this.AF = (value & 0xFFF0)
 	case .BC:
 		this.BC = value
 	case .DE:
@@ -379,6 +416,10 @@ fetch :: proc(this: ^CPU) -> u8 {
 	return op
 }
 
+div_counter: u16 = 0
+timer_counter: u16 = 0
+timer_speed: u16 = 1024
+
 run_instruction :: proc(this: ^CPU) -> (ok: bool) {
 
 	this.ins[0] = 0
@@ -387,707 +428,761 @@ run_instruction :: proc(this: ^CPU) -> (ok: bool) {
 	this.ins_idx = 0
 	this.ins_pc = this.pc
 
+	clock_before := this.clock
+
 	//fetch
-	instruction := fetch(this)
-	opcode := instruction & 0xF0
-	operand := instruction & 0x0F
+	if (!this.is_halted && !this.is_stopped) {
+		instruction := fetch(this)
+		opcode := instruction & 0xF0
+		operand := instruction & 0x0F
 
-	clk_before := this.clock
+		clk_before := this.clock
 
-	//decode + execute
-	switch opcode {
-	case 0x00:
-		switch operand {
+		//decode + execute
+		switch opcode {
 		case 0x00:
-			nop(this)
-		case 0x01:
-			ld(this, Wide_Register.BC)
-		case 0x02:
-			ld(this, Wide_Register.BC, Register.A)
-		case 0x03:
-			inc(this, Wide_Register.BC)
-		case 0x04:
-			inc(this, Register.B)
-		case 0x05:
-			dec(this, Register.B)
-		case 0x06:
-			ld_n(this, Register.B)
-		case 0x07:
-			rlca(this)
-		case 0x08:
-			dec(this, Wide_Register.BC)
-
-		case 0x09:
-			add(this, Wide_Register.HL, Wide_Register.BC)
-		case 0x0A:
-			ld(this, Register.A, Wide_Register.BC)
-		case 0x0B:
-			dec(this, Wide_Register.BC)
-		case 0x0C:
-			inc(this, Register.C)
-		case 0x0D:
-			dec(this, Register.C)
-		case 0x0E:
-			ld_n(this, .C)
-		case 0x0F:
-			rrca(this)
-		case:
-			{
-				fmt.eprintf("Unknown operand in 0x00: %2x\n", operand)
-				return false
-			}
-		}
-	case 0x10:
-		switch operand {
-		case 0x08:
-			jr(this)
-		case 0x01:
-			ld(this, Wide_Register.DE)
-		case 0x02:
-			ld(this, Wide_Register.DE, Register.A)
-		case 0x03:
-			inc(this, Wide_Register.DE)
-		case 0x04:
-			inc(this, Register.D)
-		case 0x05:
-			dec(this, Register.D)
-		case 0x06:
-			ld_n(this, Register.D)
-		case 0x07:
-			rla(this)
-		case 0x09:
-			add(this, Wide_Register.HL, Wide_Register.DE)
-		case 0x0A:
-			ld(this, Register.A, Wide_Register.DE)
-		case 0x0B:
-			dec(this, Wide_Register.DE)
-		case 0x0C:
-			inc(this, Register.E)
-		case 0x0D:
-			dec(this, Register.E)
-		case 0x0E:
-			ld_n(this, .E)
-		case:
-			{
-				fmt.eprintf("Unknown operand in 0x10: %2x\n", operand)
-				return false
-			}
-		}
-	case 0x20:
-		{
 			switch operand {
 			case 0x00:
-				jr(this, Flag.Z, false)
+				nop(this)
 			case 0x01:
-				ld(this, Wide_Register.HL)
+				ld(this, Wide_Register.BC)
 			case 0x02:
-				ldi(this, Wide_Register.HL, Register.A)
+				ld(this, Wide_Register.BC, Register.A)
 			case 0x03:
-				inc(this, Wide_Register.HL)
+				inc(this, Wide_Register.BC)
 			case 0x04:
-				inc(this, Register.H)
+				inc(this, Register.B)
 			case 0x05:
-				dec(this, Register.H)
+				dec(this, Register.B)
 			case 0x06:
-				ld_n(this, Register.H)
+				ld_n(this, Register.B)
 			case 0x07:
-				daa(this)
+				rlca(this)
 			case 0x08:
-				jr(this, Flag.Z, true)
+				dec(this, Wide_Register.BC)
+
 			case 0x09:
-				add(this, Wide_Register.HL, Wide_Register.HL)
+				add(this, Wide_Register.HL, Wide_Register.BC)
 			case 0x0A:
-				ldi(this, Register.A, Wide_Register.HL)
+				ld(this, Register.A, Wide_Register.BC)
 			case 0x0B:
-				dec(this, Wide_Register.HL)
+				dec(this, Wide_Register.BC)
 			case 0x0C:
-				inc(this, Register.L)
+				inc(this, Register.C)
 			case 0x0D:
-				dec(this, Register.L)
+				dec(this, Register.C)
 			case 0x0E:
-				ld_n(this, .L)
+				ld_n(this, .C)
 			case 0x0F:
-				cpl(this)
+				rrca(this)
 			case:
 				{
-					fmt.eprintf("Unknown operand in 0x20: %2x\n", operand)
+					fmt.eprintf("Unknown operand in 0x00: %2x\n", operand)
 					return false
 				}
 			}
-		}
-	case 0x30:
-		switch operand {
-		case 0x00:
-			jr(this, Flag.C, false)
-		case 0x01:
-			ld(this, Wide_Register.SP)
-		case 0x02:
-			ldd(this, Wide_Register.HL, Register.A)
-		case 0x03:
-			inc(this, Wide_Register.SP)
-		case 0x04:
-			inc_ind(this, Wide_Register.HL)
-		case 0x05:
-			dec_ind(this, Wide_Register.HL)
-		case 0x06:
-			{
-				n := fetch(this)
-				ld(this, Wide_Register.HL, n)
+		case 0x10:
+			switch operand {
+			case 0x00:
+				{
+					this.is_stopped = true
+					this.clock += 4
+				}
+			case 0x01:
+				ld(this, Wide_Register.DE)
+			case 0x02:
+				ld(this, Wide_Register.DE, Register.A)
+			case 0x03:
+				inc(this, Wide_Register.DE)
+			case 0x04:
+				inc(this, Register.D)
+			case 0x05:
+				dec(this, Register.D)
+			case 0x06:
+				ld_n(this, Register.D)
+			case 0x07:
+				rla(this)
+			case 0x08:
+				jr(this)
+			case 0x09:
+				add(this, Wide_Register.HL, Wide_Register.DE)
+			case 0x0A:
+				ld(this, Register.A, Wide_Register.DE)
+			case 0x0B:
+				dec(this, Wide_Register.DE)
+			case 0x0C:
+				inc(this, Register.E)
+			case 0x0D:
+				dec(this, Register.E)
+			case 0x0E:
+				ld_n(this, .E)
+			case 0x0F:
+				rra(this)
+			case:
+				{
+					fmt.eprintf("Unknown operand in 0x10: %2x\n", operand)
+					return false
+				}
 			}
-		case 0x07:
+		case 0x20:
 			{
-				set_flag(this, Flag.N, false)
-				set_flag(this, Flag.H, false)
-				set_flag(this, Flag.C, true)
-				this.clock += 4
+				switch operand {
+				case 0x00:
+					jr(this, Flag.Z, false)
+				case 0x01:
+					ld(this, Wide_Register.HL)
+				case 0x02:
+					ldi(this, Wide_Register.HL, Register.A)
+				case 0x03:
+					inc(this, Wide_Register.HL)
+				case 0x04:
+					inc(this, Register.H)
+				case 0x05:
+					dec(this, Register.H)
+				case 0x06:
+					ld_n(this, Register.H)
+				case 0x07:
+					daa(this)
+				case 0x08:
+					jr(this, Flag.Z, true)
+				case 0x09:
+					add(this, Wide_Register.HL, Wide_Register.HL)
+				case 0x0A:
+					ldi(this, Register.A, Wide_Register.HL)
+				case 0x0B:
+					dec(this, Wide_Register.HL)
+				case 0x0C:
+					inc(this, Register.L)
+				case 0x0D:
+					dec(this, Register.L)
+				case 0x0E:
+					ld_n(this, .L)
+				case 0x0F:
+					cpl(this)
+				case:
+					{
+						fmt.eprintf("Unknown operand in 0x20: %2x\n", operand)
+						return false
+					}
+				}
 			}
-		case 0x08:
-			jr(this, Flag.C, true)
-		case 0x09:
-			add(this, Wide_Register.HL, Wide_Register.SP)
-		case 0x0A:
-			ldd(this, Register.A, Wide_Register.HL)
-		case 0x0B:
-			dec(this, Wide_Register.SP)
-		case 0x0C:
-			inc(this, Register.A)
-		case 0x0D:
-			dec(this, Register.A)
-		case 0x0E:
-			ld_n(this, .A)
+		case 0x30:
+			switch operand {
+			case 0x00:
+				jr(this, Flag.C, false)
+			case 0x01:
+				ld(this, Wide_Register.SP)
+			case 0x02:
+				ldd(this, Wide_Register.HL, Register.A)
+			case 0x03:
+				inc(this, Wide_Register.SP)
+			case 0x04:
+				inc_ind(this, Wide_Register.HL)
+			case 0x05:
+				dec_ind(this, Wide_Register.HL)
+			case 0x06:
+				{
+					n := fetch(this)
+					ld(this, Wide_Register.HL, n)
+				}
+			case 0x07:
+				{
+					set_flag(this, Flag.N, false)
+					set_flag(this, Flag.H, false)
+					set_flag(this, Flag.C, true)
+					this.clock += 4
+				}
+			case 0x08:
+				jr(this, Flag.C, true)
+			case 0x09:
+				add(this, Wide_Register.HL, Wide_Register.SP)
+			case 0x0A:
+				ldd(this, Register.A, Wide_Register.HL)
+			case 0x0B:
+				dec(this, Wide_Register.SP)
+			case 0x0C:
+				inc(this, Register.A)
+			case 0x0D:
+				dec(this, Register.A)
+			case 0x0E:
+				ld_n(this, .A)
+			case 0x0F:
+				ccf(this)
+			case:
+				{
+					fmt.eprintf("Unknown operand in 0x30: %2x\n", operand)
+					return false
+				}
+			}
+		case 0x40:
+			switch operand {
+			case 0x00:
+				ld(this, Register.B, Register.B)
+			case 0x01:
+				ld(this, Register.B, Register.C)
+			case 0x02:
+				ld(this, Register.B, Register.D)
+			case 0x03:
+				ld(this, Register.B, Register.E)
+			case 0x04:
+				ld(this, Register.B, Register.H)
+			case 0x05:
+				ld(this, Register.B, Register.L)
+			case 0x06:
+				ld(this, Register.B, Wide_Register.HL)
+			case 0x07:
+				ld(this, Register.B, Register.A)
+
+			case 0x08:
+				ld(this, Register.C, Register.B)
+			case 0x09:
+				ld(this, Register.C, Register.C)
+			case 0x0A:
+				ld(this, Register.C, Register.D)
+			case 0x0B:
+				ld(this, Register.C, Register.E)
+			case 0x0C:
+				ld(this, Register.C, Register.H)
+			case 0x0D:
+				ld(this, Register.C, Register.L)
+			case 0x0E:
+				ld(this, Register.C, Wide_Register.HL)
+			case 0x0F:
+				ld(this, Register.C, Register.A)
+			}
+		case 0x50:
+			switch operand {
+			case 0x00:
+				ld(this, Register.D, Register.B)
+			case 0x01:
+				ld(this, Register.D, Register.C)
+			case 0x02:
+				ld(this, Register.D, Register.D)
+			case 0x03:
+				ld(this, Register.D, Register.E)
+			case 0x04:
+				ld(this, Register.D, Register.H)
+			case 0x05:
+				ld(this, Register.D, Register.L)
+			case 0x06:
+				ld(this, Register.D, Wide_Register.HL)
+			case 0x07:
+				ld(this, Register.D, Register.A)
+
+			case 0x08:
+				ld(this, Register.E, Register.B)
+			case 0x09:
+				ld(this, Register.E, Register.C)
+			case 0x0A:
+				ld(this, Register.E, Register.D)
+			case 0x0B:
+				ld(this, Register.E, Register.E)
+			case 0x0C:
+				ld(this, Register.E, Register.H)
+			case 0x0D:
+				ld(this, Register.E, Register.L)
+			case 0x0E:
+				ld(this, Register.E, Wide_Register.HL)
+			case 0x0F:
+				ld(this, Register.E, Register.A)
+			}
+		case 0x60:
+			switch operand {
+			case 0x00:
+				ld(this, Register.H, Register.B)
+			case 0x01:
+				ld(this, Register.H, Register.C)
+			case 0x02:
+				ld(this, Register.H, Register.D)
+			case 0x03:
+				ld(this, Register.H, Register.E)
+			case 0x04:
+				ld(this, Register.H, Register.H)
+			case 0x05:
+				ld(this, Register.H, Register.L)
+			case 0x06:
+				ld(this, Register.H, Wide_Register.HL)
+			case 0x07:
+				ld(this, Register.H, Register.A)
+
+			case 0x08:
+				ld(this, Register.L, Register.B)
+			case 0x09:
+				ld(this, Register.L, Register.C)
+			case 0x0A:
+				ld(this, Register.L, Register.D)
+			case 0x0B:
+				ld(this, Register.L, Register.E)
+			case 0x0C:
+				ld(this, Register.L, Register.H)
+			case 0x0D:
+				ld(this, Register.L, Register.L)
+			case 0x0E:
+				ld(this, Register.L, Wide_Register.HL)
+			case 0x0F:
+				ld(this, Register.L, Register.A)
+			}
+		case 0x70:
+			switch operand {
+			case 0x00:
+				ld(this, Wide_Register.HL, Register.B)
+			case 0x01:
+				ld(this, Wide_Register.HL, Register.C)
+			case 0x02:
+				ld(this, Wide_Register.HL, Register.D)
+			case 0x03:
+				ld(this, Wide_Register.HL, Register.E)
+			case 0x04:
+				ld(this, Wide_Register.HL, Register.H)
+			case 0x05:
+				ld(this, Wide_Register.HL, Register.L)
+			case 0x06:
+				{
+					//fmt.println("HALT")
+					this.is_halted = true
+					this.clock += 4
+				}
+			case 0x07:
+				ld(this, Wide_Register.HL, Register.A)
+
+			case 0x08:
+				ld(this, Register.A, Register.B)
+			case 0x09:
+				ld(this, Register.A, Register.C)
+			case 0x0A:
+				ld(this, Register.A, Register.D)
+			case 0x0B:
+				ld(this, Register.A, Register.E)
+			case 0x0C:
+				ld(this, Register.A, Register.H)
+			case 0x0D:
+				ld(this, Register.A, Register.L)
+			case 0x0E:
+				ld(this, Register.A, Wide_Register.HL)
+			case 0x0F:
+				ld(this, Register.A, Register.A)
+			}
+		case 0x80:
+			switch operand {
+			case 0x00:
+				add(this, Register.B)
+			case 0x01:
+				add(this, Register.C)
+			case 0x02:
+				add(this, Register.D)
+			case 0x03:
+				add(this, Register.E)
+			case 0x04:
+				add(this, Register.H)
+			case 0x05:
+				add(this, Register.L)
+			case 0x06:
+				add(this, Wide_Register.HL)
+			case 0x07:
+				add(this, Register.A)
+
+			case 0x08:
+				adc(this, Register.B)
+			case 0x09:
+				adc(this, Register.C)
+			case 0x0A:
+				adc(this, Register.D)
+			case 0x0B:
+				adc(this, Register.E)
+			case 0x0C:
+				adc(this, Register.H)
+			case 0x0D:
+				adc(this, Register.L)
+			case 0x0E:
+				adc(this, Wide_Register.HL)
+			case 0x0F:
+				adc(this, Register.A)
+			}
+		case 0x90:
+			switch operand {
+			case 0x00:
+				sub(this, Register.B)
+			case 0x01:
+				sub(this, Register.C)
+			case 0x02:
+				sub(this, Register.D)
+			case 0x03:
+				sub(this, Register.E)
+			case 0x04:
+				sub(this, Register.H)
+			case 0x05:
+				sub(this, Register.L)
+			case 0x06:
+				sub(this, Wide_Register.HL)
+			case 0x07:
+				sub(this, Register.A)
+
+			case 0x08:
+				sbc(this, Register.B)
+			case 0x09:
+				sbc(this, Register.C)
+			case 0x0A:
+				sbc(this, Register.D)
+			case 0x0B:
+				sbc(this, Register.E)
+			case 0x0C:
+				sbc(this, Register.H)
+			case 0x0D:
+				sbc(this, Register.L)
+			case 0x0E:
+				sbc(this, Wide_Register.HL)
+			case 0x0F:
+				sbc(this, Register.A)
+			}
+		case 0xA0:
+			switch operand {
+			case 0x00:
+				and(this, Register.B)
+			case 0x01:
+				and(this, Register.C)
+			case 0x02:
+				and(this, Register.D)
+			case 0x03:
+				and(this, Register.E)
+			case 0x04:
+				and(this, Register.H)
+			case 0x05:
+				and(this, Register.L)
+			case 0x06:
+				and(this, Wide_Register.HL)
+			case 0x07:
+				and(this, Register.A)
+
+			case 0x08:
+				xor(this, Register.B)
+			case 0x09:
+				xor(this, Register.C)
+			case 0x0A:
+				xor(this, Register.D)
+			case 0x0B:
+				xor(this, Register.E)
+			case 0x0C:
+				xor(this, Register.H)
+			case 0x0D:
+				xor(this, Register.L)
+			case 0x0E:
+				xor(this, Wide_Register.HL)
+			case 0x0F:
+				xor(this, Register.A)
+			}
+		case 0xB0:
+			switch operand {
+			case 0x00:
+				or(this, Register.B)
+			case 0x01:
+				or(this, Register.C)
+			case 0x02:
+				or(this, Register.D)
+			case 0x03:
+				or(this, Register.E)
+			case 0x04:
+				or(this, Register.H)
+			case 0x05:
+				or(this, Register.L)
+			case 0x06:
+				or(this, Wide_Register.HL)
+			case 0x07:
+				or(this, Register.A)
+
+			case 0x08:
+				cp(this, Register.B)
+			case 0x09:
+				cp(this, Register.C)
+			case 0x0A:
+				cp(this, Register.D)
+			case 0x0B:
+				cp(this, Register.E)
+			case 0x0C:
+				cp(this, Register.H)
+			case 0x0D:
+				cp(this, Register.L)
+			case 0x0E:
+				cp(this, Wide_Register.HL)
+			case 0x0F:
+				cp(this, Register.A)
+			}
+		case 0xC0:
+			switch operand {
+			case 0x00:
+				ret(this, Flag.Z, false)
+			case 0x01:
+				pop(this, .BC)
+			case 0x02:
+				jp(this, Flag.Z, false)
+			case 0x03:
+				{
+					lo := fetch(this)
+					hi := fetch(this)
+
+					address := (u16(hi) << 8 | u16(lo))
+
+					jp(this, address)
+				}
+			case 0x04:
+				call(this, Flag.Z, false)
+			case 0x05:
+				push(this, .BC)
+			case 0x06:
+				{
+					value := fetch(this)
+					add_imm(this, .A, value)
+				}
+			case 0x08:
+				ret(this, Flag.Z)
+			case 0x09:
+				ret(this)
+			case 0x0a:
+				jp(this, Flag.Z)
+			case 0x0B:
+				ok = prefix_cb(this)
+			case 0x07:
+				rst(this, 0x0000)
+			case 0x0C:
+				call(this, Flag.Z)
+			case 0x0D:
+				call(this)
+			case 0x0E:
+				adc(this)
+			case 0x0F:
+				rst(this, 0x0008)
+			case:
+				{
+					fmt.eprintf("Unknown operand in 0xC0: %2x\n", operand)
+					return false
+				}
+			}
+		case 0xD0:
+			switch operand {
+			case 0x00:
+				ret(this, Flag.C, false)
+			case 0x01:
+				pop(this, .DE)
+			case 0x02:
+				jp(this, Flag.C, false)
+			case 0x03:
+				{ /*Not an instruction*/}
+			case 0x04:
+				call(this, Flag.C, false)
+			case 0x05:
+				push(this, .DE)
+			case 0x06:
+				{
+					value := fetch(this)
+					sub_imm(this, .A, value)
+				}
+			case 0x07:
+				rst(this, 0x0010)
+			case 0x08:
+				ret(this, Flag.C)
+			case 0x09:
+				reti(this)
+			case 0x0A:
+				jp(this, Flag.C)
+			case 0x0B:
+				{ /*Not an instruction*/}
+			case 0x0C:
+				call(this, Flag.C)
+			case 0x0D:
+				{ /*Not an instruction*/}
+			case 0x0E:
+				sbc(this)
+			case 0x0F:
+				rst(this, 0x0018)
+			case:
+				{
+					fmt.eprintf("Unknown operand in 0xD0: %2x\n", operand)
+					return false
+				}
+			}
+		case 0xE0:
+			switch operand {
+			case 0x00:
+				{
+					//write to io-port n
+					n := fetch(this)
+
+					write_to_memory(this, 0xFF00 + u16(n), get_register(this, Register.A))
+
+					this.clock += 12
+				}
+			case 0x01:
+				pop(this, .HL)
+			case 0x02:
+				{
+					//write to io-port (c)
+					n := get_register(this, Register.C)
+
+					write_to_memory(this, 0xFF00 + u16(n), get_register(this, Register.A))
+
+					this.clock += 8
+				}
+			case 0x03:
+				{ /*Not an instruction*/}
+			case 0x04:
+				{ /*Not an instruction*/}
+			case 0x05:
+				push(this, .HL)
+			case 0x06:
+				and(this, Register.A, fetch(this))
+			case 0x07:
+				rst(this, 0x0020)
+			case 0x08:
+				add_sp_r8(this)
+			case 0x09:
+				jp_hl(this)
+			case 0x0A:
+				ld_from(this, .A)
+			case 0x0B:
+				{ /*Not an instruction*/}
+			case 0x0C:
+				{ /*Not an instruction*/}
+			case 0x0D:
+				{ /*Not an instruction*/}
+			case 0x0E:
+				xor(this)
+			case 0x0F:
+				rst(this, 0x0028)
+			case:
+				{
+					fmt.eprintf("Unknown operand in 0xE0: %2x\n", operand)
+					return false
+				}
+			}
+		case 0xF0:
+			switch operand {
+			case 0x00:
+				{
+					//read from io port n
+					n := fetch(this)
+
+					set_register(this, Register.A, read_from_memory(this, 0xFF00 + u16(n)))
+
+					this.clock += 12
+				}
+			case 0x01:
+				pop(this, .AF)
+			case 0x02:
+				{
+					c := get_register(this, Register.C)
+					set_register(this, Register.A, read_from_memory(this, 0xFF00 + u16(c)))
+
+					this.clock += 8
+				}
+			case 0x03:
+				di(this)
+			case 0x05:
+				push(this, .AF)
+			case 0x06:
+				or(this)
+			case 0x07:
+				rst(this, 0x0030)
+			case 0x08:
+				ld_hl_sp_d8(this)
+			case 0x09:
+				ld(this, Wide_Register.SP, Wide_Register.HL)
+			case 0x0A:
+				ld(this, Register.A)
+			case 0x0B:
+				ei(this)
+			case 0x0C:
+				{ /*Not an instruction*/}
+			case 0x0D:
+				{ /*Not an instruction*/}
+			case 0x0E:
+				cp(this)
+			case 0x0F:
+				rst(this, 0x0038)
+			case:
+				{
+					fmt.eprintf("Unknown operand in 0xF0: %2x\n", operand)
+					return false
+				}
+			}
 		case:
 			{
-				fmt.eprintf("Unknown operand in 0x30: %2x\n", operand)
+				fmt.eprintf("Unknown opcode %2x\n", opcode)
 				return false
 			}
-		}
-	case 0x40:
-		switch operand {
-		case 0x00:
-			ld(this, Register.B, Register.B)
-		case 0x01:
-			ld(this, Register.B, Register.C)
-		case 0x02:
-			ld(this, Register.B, Register.D)
-		case 0x03:
-			ld(this, Register.B, Register.E)
-		case 0x04:
-			ld(this, Register.B, Register.H)
-		case 0x05:
-			ld(this, Register.B, Register.L)
-		case 0x06:
-			ld(this, Register.B, Wide_Register.HL)
-		case 0x07:
-			ld(this, Register.B, Register.A)
-
-		case 0x08:
-			ld(this, Register.C, Register.B)
-		case 0x09:
-			ld(this, Register.C, Register.C)
-		case 0x0A:
-			ld(this, Register.C, Register.D)
-		case 0x0B:
-			ld(this, Register.C, Register.E)
-		case 0x0C:
-			ld(this, Register.C, Register.H)
-		case 0x0D:
-			ld(this, Register.C, Register.L)
-		case 0x0E:
-			ld(this, Register.C, Wide_Register.HL)
-		case 0x0F:
-			ld(this, Register.C, Register.A)
-		}
-	case 0x50:
-		switch operand {
-		case 0x00:
-			ld(this, Register.D, Register.B)
-		case 0x01:
-			ld(this, Register.D, Register.C)
-		case 0x02:
-			ld(this, Register.D, Register.D)
-		case 0x03:
-			ld(this, Register.D, Register.E)
-		case 0x04:
-			ld(this, Register.D, Register.H)
-		case 0x05:
-			ld(this, Register.D, Register.L)
-		case 0x06:
-			ld(this, Register.D, Wide_Register.HL)
-		case 0x07:
-			ld(this, Register.D, Register.A)
-
-		case 0x08:
-			ld(this, Register.E, Register.B)
-		case 0x09:
-			ld(this, Register.E, Register.C)
-		case 0x0A:
-			ld(this, Register.E, Register.D)
-		case 0x0B:
-			ld(this, Register.E, Register.E)
-		case 0x0C:
-			ld(this, Register.E, Register.H)
-		case 0x0D:
-			ld(this, Register.E, Register.L)
-		case 0x0E:
-			ld(this, Register.E, Wide_Register.HL)
-		case 0x0F:
-			ld(this, Register.E, Register.A)
-		}
-	case 0x60:
-		switch operand {
-		case 0x00:
-			ld(this, Register.H, Register.B)
-		case 0x01:
-			ld(this, Register.H, Register.C)
-		case 0x02:
-			ld(this, Register.H, Register.D)
-		case 0x03:
-			ld(this, Register.H, Register.E)
-		case 0x04:
-			ld(this, Register.H, Register.H)
-		case 0x05:
-			ld(this, Register.H, Register.L)
-		case 0x06:
-			ld(this, Register.H, Wide_Register.HL)
-		case 0x07:
-			ld(this, Register.H, Register.A)
-
-		case 0x08:
-			ld(this, Register.L, Register.B)
-		case 0x09:
-			ld(this, Register.L, Register.C)
-		case 0x0A:
-			ld(this, Register.L, Register.D)
-		case 0x0B:
-			ld(this, Register.L, Register.E)
-		case 0x0C:
-			ld(this, Register.L, Register.H)
-		case 0x0D:
-			ld(this, Register.L, Register.L)
-		case 0x0E:
-			ld(this, Register.L, Wide_Register.HL)
-		case 0x0F:
-			ld(this, Register.L, Register.A)
-		}
-	case 0x70:
-		switch operand {
-		case 0x00:
-			ld(this, Wide_Register.HL, Register.B)
-		case 0x01:
-			ld(this, Wide_Register.HL, Register.C)
-		case 0x02:
-			ld(this, Wide_Register.HL, Register.D)
-		case 0x03:
-			ld(this, Wide_Register.HL, Register.E)
-		case 0x04:
-			ld(this, Wide_Register.HL, Register.H)
-		case 0x05:
-			ld(this, Wide_Register.HL, Register.L)
-		case 0x06:
-			this.clock += 4
-		case 0x07:
-			ld(this, Wide_Register.HL, Register.A)
-
-		case 0x08:
-			ld(this, Register.A, Register.B)
-		case 0x09:
-			ld(this, Register.A, Register.C)
-		case 0x0A:
-			ld(this, Register.A, Register.D)
-		case 0x0B:
-			ld(this, Register.A, Register.E)
-		case 0x0C:
-			ld(this, Register.A, Register.H)
-		case 0x0D:
-			ld(this, Register.A, Register.L)
-		case 0x0E:
-			ld(this, Register.A, Wide_Register.HL)
-		case 0x0F:
-			ld(this, Register.A, Register.A)
-		}
-	case 0x80:
-		switch operand {
-		case 0x00:
-			add(this, Register.B)
-		case 0x01:
-			add(this, Register.C)
-		case 0x02:
-			add(this, Register.D)
-		case 0x03:
-			add(this, Register.E)
-		case 0x04:
-			add(this, Register.H)
-		case 0x05:
-			add(this, Register.L)
-		case 0x06:
-			add(this, Wide_Register.HL)
-		case 0x07:
-			add(this, Register.A)
-
-		case 0x08:
-			adc(this, Register.B)
-		case 0x09:
-			adc(this, Register.C)
-		case 0x0A:
-			adc(this, Register.D)
-		case 0x0B:
-			adc(this, Register.E)
-		case 0x0C:
-			adc(this, Register.H)
-		case 0x0D:
-			adc(this, Register.L)
-		case 0x0E:
-			adc(this, Wide_Register.HL)
-		case 0x0F:
-			adc(this, Register.A)
-		}
-	case 0x90:
-		switch operand {
-		case 0x00:
-			sub(this, Register.B)
-		case 0x01:
-			sub(this, Register.C)
-		case 0x02:
-			sub(this, Register.D)
-		case 0x03:
-			sub(this, Register.E)
-		case 0x04:
-			sub(this, Register.H)
-		case 0x05:
-			sub(this, Register.L)
-		case 0x06:
-			sub(this, Wide_Register.HL)
-		case 0x07:
-			sub(this, Register.A)
-
-		case 0x08:
-			sbc(this, Register.B)
-		case 0x09:
-			sbc(this, Register.C)
-		case 0x0A:
-			sbc(this, Register.D)
-		case 0x0B:
-			sbc(this, Register.E)
-		case 0x0C:
-			sbc(this, Register.H)
-		case 0x0D:
-			sbc(this, Register.L)
-		case 0x0E:
-			sbc(this, Wide_Register.HL)
-		case 0x0F:
-			sbc(this, Register.A)
-		}
-	case 0xA0:
-		switch operand {
-		case 0x00:
-			and(this, Register.B)
-		case 0x01:
-			and(this, Register.C)
-		case 0x02:
-			and(this, Register.D)
-		case 0x03:
-			and(this, Register.E)
-		case 0x04:
-			and(this, Register.H)
-		case 0x05:
-			and(this, Register.L)
-		case 0x06:
-			and(this, Wide_Register.HL)
-		case 0x07:
-			and(this, Register.A)
-
-		case 0x08:
-			xor(this, Register.B)
-		case 0x09:
-			xor(this, Register.C)
-		case 0x0A:
-			xor(this, Register.D)
-		case 0x0B:
-			xor(this, Register.E)
-		case 0x0C:
-			xor(this, Register.H)
-		case 0x0D:
-			xor(this, Register.L)
-		case 0x0E:
-			xor(this, Wide_Register.HL)
-		case 0x0F:
-			xor(this, Register.A)
-		}
-	case 0xB0:
-		switch operand {
-		case 0x00:
-			or(this, Register.B)
-		case 0x01:
-			or(this, Register.C)
-		case 0x02:
-			or(this, Register.D)
-		case 0x03:
-			or(this, Register.E)
-		case 0x04:
-			or(this, Register.H)
-		case 0x05:
-			or(this, Register.L)
-		case 0x06:
-			or(this, Wide_Register.HL)
-		case 0x07:
-			or(this, Register.A)
-
-		case 0x08:
-			cp(this, Register.B)
-		case 0x09:
-			cp(this, Register.C)
-		case 0x0A:
-			cp(this, Register.D)
-		case 0x0B:
-			cp(this, Register.E)
-		case 0x0C:
-			cp(this, Register.H)
-		case 0x0D:
-			cp(this, Register.L)
-		case 0x0E:
-			cp(this, Wide_Register.HL)
-		case 0x0F:
-			cp(this, Register.A)
-		}
-	case 0xC0:
-		switch operand {
-		case 0x00:
-			ret(this, Flag.Z, false)
-		case 0x01:
-			pop(this, .BC)
-		case 0x02:
-			jp(this, Flag.Z, false)
-		case 0x03:
-			{
-				lo := fetch(this)
-				hi := fetch(this)
-
-				address := (u16(hi) << 8 | u16(lo))
-
-				jp(this, address)
-			}
-		case 0x04:
-			call(this, Flag.N, false)
-		case 0x05:
-			push(this, .BC)
-		case 0x06:
-			{
-				value := fetch(this)
-				add_imm(this, .A, value)
-			}
-		case 0x08:
-			ret(this, Flag.Z)
-		case 0x09:
-			ret(this)
-		case 0x0a:
-			jp(this, Flag.Z)
-		case 0x0B:
-			prefix_cb(this)
-		case 0x07:
-			rst(this, 0x0000)
-		case 0x0C:
-			call(this, Flag.Z)
-		case 0x0D:
-			call(this)
-		case 0x0E:
-			adc(this)
-		case 0x0F:
-			rst(this, 0x0008)
-		case:
-			{
-				fmt.eprintf("Unknown operand in 0xC0: %2x\n", operand)
-				return false
-			}
-		}
-	case 0xD0:
-		switch operand {
-		case 0x00:
-			ret(this, Flag.C, false)
-		case 0x01:
-			pop(this, .DE)
-		case 0x02:
-			jp(this, Flag.C, false)
-		case 0x03:
-			{ /*Not an instruction*/}
-		case 0x04:
-			call(this, Flag.C, false)
-		case 0x05:
-			push(this, .DE)
-		case 0x06:
-			{
-				value := fetch(this)
-				sub_imm(this, .A, value)
-			}
-		case 0x07:
-			rst(this, 0x0010)
-		case 0x08:
-			ret(this, Flag.C)
-		case 0x09:
-			reti(this)
-		case 0x0A:
-			jp(this, Flag.C)
-		case 0x0B:
-			{ /*Not an instruction*/}
-		case 0x0C:
-			call(this, Flag.C)
-		case 0x0D:
-			{ /*Not an instruction*/}
-		case 0x0E:
-			sbc(this)
-		case 0x0F:
-			rst(this, 0x0018)
-		case:
-			{
-				fmt.eprintf("Unknown operand in 0xD0: %2x\n", operand)
-				return false
-			}
-		}
-	case 0xE0:
-		switch operand {
-		case 0x00:
-			{
-				//write to io-port n
-				n := fetch(this)
-
-				write_to_memory(this, 0xFF00 + u16(n), get_register(this, Register.A))
-
-				this.clock += 12
-			}
-		case 0x01:
-			pop(this, .HL)
-		case 0x02:
-			{
-				//write to io-port (c)
-				n := get_register(this, Register.C)
-
-				write_to_memory(this, 0xFF00 + u16(n), get_register(this, Register.A))
-
-				this.clock += 8
-			}
-		case 0x03:
-			{ /*Not an instruction*/}
-		case 0x04:
-			{ /*Not an instruction*/}
-		case 0x05:
-			push(this, .HL)
-		case 0x06:
-			and(this, Register.A, fetch(this))
-		case 0x07:
-			rst(this, 0x0020)
-		case 0x08:
-			add_sp_r8(this)
-		case 0x09:
-			jp_hl(this)
-		case 0x0A:
-			ld_from(this, .A)
-		case 0x0B:
-			{ /*Not an instruction*/}
-		case 0x0C:
-			{ /*Not an instruction*/}
-		case 0x0D:
-			{ /*Not an instruction*/}
-		case 0x0E:
-			xor(this)
-		case 0x0F:
-			rst(this, 0x0028)
-		case:
-			{
-				fmt.eprintf("Unknown operand in 0xE0: %2x\n", operand)
-				return false
-			}
-		}
-	case 0xF0:
-		switch operand {
-		case 0x00:
-			{
-				//read from io port n
-				n := fetch(this)
-
-				set_register(this, Register.A, read_from_memory(this, 0xFF00 + u16(n)))
-
-				this.clock += 12
-			}
-		case 0x01:
-			pop(this, .AF)
-		case 0x02:
-			{
-				c := get_register(this, Register.C)
-				set_register(this, Register.A, read_from_memory(this, 0xFF00 + u16(c)))
-
-				this.clock += 8
-			}
-		case 0x03:
-			di(this)
-		case 0x05:
-			push(this, .AF)
-		case 0x06:
-			or(this)
-		case 0x07:
-			rst(this, 0x0030)
-		case 0x08:
-			ld_hl_sp_d8(this)
-		case 0x0A:
-			ld(this, Register.A)
-		case 0x0B:
-			ei(this)
-		case 0x0C:
-			{ /*Not an instruction*/}
-		case 0x0D:
-			{ /*Not an instruction*/}
-		case 0x0E:
-			cp(this)
-		case 0x0F:
-			rst(this, 0x0038)
-		case:
-			{
-				fmt.eprintf("Unknown operand in 0xF0: %2x\n", operand)
-				return false
-			}
-		}
-	case:
-		{
-			fmt.eprintf("Unknown opcode %2x\n", opcode)
-			return false
 		}
 	}
+
+	//Update timer
+	cycles := u16(this.clock - clock_before)
+	handle_timer(this, cycles)
 
 	//Check for interrupts
 	//Interrupts must be handled in the order they appear in the Interrupt struct
-	if get_interrupt_flag(this, .VBLANK) && interrupt_enabled(this, .VBLANK) {
-
-		this.in_interrupt = true
-
-		write_to_memory(this, IE_REGISTER, 0)
-		set_interrupt_flag(this, .VBLANK, 0)
-
-		this.sp -= 2
-		write_to_memory(this, this.sp, u8(this.pc & 0x00FF))
-		write_to_memory(this, this.sp + 1, u8(this.pc & 0xFF00 >> 8))
-
-		this.pc = 0x0040
-
-		this.clock += 24
-	}
-
-	if get_interrupt_flag(this, .JOYPAD) && interrupt_enabled(this, .JOYPAD) {
-
-		fmt.println("JOYPAD INTERRUPT")
-
-		this.in_interrupt = true
-
-		write_to_memory(this, IE_REGISTER, 0)
-		set_interrupt_flag(this, .JOYPAD, 0)
-
-		this.sp -= 2
-		write_to_memory(this, this.sp, u8(this.pc & 0x00FF))
-		write_to_memory(this, this.sp + 1, u8(this.pc & 0xFF00 >> 8))
-
-		this.pc = 0x0060
-
-		this.clock += 24
-	}
+	handle_interrupt(this, .VBLANK)
+	handle_interrupt(this, .LCD_STAT)
+	handle_interrupt(this, .TIMER)
+	handle_interrupt(this, .SERIAL)
+	handle_interrupt(this, .JOYPAD)
 
 	return true
+}
+
+handle_interrupt :: proc(this: ^CPU, interrupt: Interrupt) {
+	if (get_interrupt_flag(this, interrupt)) {
+		this.is_halted = false
+	}
+	if get_interrupt_flag(this, interrupt) && interrupt_enabled(this, interrupt) {
+		this.in_interrupt = true
+
+		write_to_memory(this, IE_REGISTER, 0)
+		set_interrupt_flag(this, interrupt, 0)
+
+		this.sp -= 2
+		write_to_memory(this, this.sp, u8(this.pc & 0x00FF))
+		write_to_memory(this, this.sp + 1, u8(this.pc & 0xFF00 >> 8))
+
+		switch interrupt {
+		case .VBLANK:
+			this.pc = 0x0040
+		case .LCD_STAT:
+			this.pc = 0x0048
+		case .TIMER:
+			this.pc = 0x0050
+		case .SERIAL:
+			this.pc = 0x0058
+		case .JOYPAD:
+			this.pc = 0x0060
+		}
+
+		this.clock += 24
+	}
+}
+
+handle_timer :: proc(this: ^CPU, cycles: u16) {
+
+	div_counter += cycles
+	if (div_counter >= 256) {
+		div_counter = 0
+		this.io_ports[4] += 1
+	}
+
+	tac := read_from_memory(this, TAC_REGISTER)
+	timer_enable := read_bit(tac, 2)
+	if timer_enable {
+		fmt.println("TIMER ENABLED!")
+		timer_counter += cycles
+
+		if (timer_counter >= timer_speed) {
+			timer_counter = 0
+			tima := read_from_memory(this, TIMA_REGISTER)
+			if (tima == 255) {
+				modulo := read_from_memory(this, TMA_MOD_REGISTER)
+				write_to_memory(this, TIMA_REGISTER, modulo)
+				set_interrupt_flag(this, .TIMER, 1)
+			} else {
+				write_to_memory(this, TIMA_REGISTER, tima + 1)
+			}
+		}
+	}
 }
 
 nop :: proc(this: ^CPU) {
@@ -1099,6 +1194,7 @@ nop :: proc(this: ^CPU) {
 ld :: proc {
 	ld_imm,
 	ld_wide,
+	ld_wide_2,
 	ld_wide_imm,
 	ld_indirect_wide,
 	ld_addr_indirect,
@@ -1115,7 +1211,7 @@ ld_hl_sp_d8 :: proc(this: ^CPU) {
 
 	set_flag(this, .Z, false)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) + (u16(offset) & 0xf)) & 0x10) == 0x10)
 	set_flag(this, .C, after < before)
 
 	this.clock += 12
@@ -1151,6 +1247,13 @@ ld_n :: proc(this: ^CPU, r: Register) {
 ld_wide :: proc(this: ^CPU, destination: Wide_Register, source: Register) {
 
 	write_to_memory(this, get_register(this, destination), get_register(this, source))
+
+	this.clock += 8
+}
+
+ld_wide_2 :: proc(this: ^CPU, destination: Wide_Register, source: Wide_Register) {
+
+	set_register(this, destination, get_register(this, source))
 
 	this.clock += 8
 }
@@ -1251,9 +1354,8 @@ push :: proc(this: ^CPU, register: Wide_Register) {
 
 	value := get_register(this, register)
 
-	write_to_memory(this, this.sp, u8(value & 0x00FF))
-
 	write_to_memory(this, this.sp + 1, u8(value & 0xFF00 >> 8))
+	write_to_memory(this, this.sp, u8(value & 0x00FF))
 
 	this.clock += 16
 }
@@ -1288,55 +1390,58 @@ add_sp_r8 :: proc(this: ^CPU) {
 
 	set_flag(this, .Z, false)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (this.sp & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) + (u16(offset) & 0xf)) & 0x10) == 0x10)
 	set_flag(this, .C, this.sp < before)
 
 	this.clock += 16
 }
 
 add_w_w :: proc(this: ^CPU, r1: Wide_Register, r2: Wide_Register) {
-	before := get_register(this, r1)
+	a := get_register(this, r1)
+	b := get_register(this, r2)
 
-	after := before + get_register(this, r2)
+	after := a + b
 
 	set_register(this, r1, after)
 
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, after < a)
 
 	this.clock += 8
 }
 
 add_r :: proc(this: ^CPU, register: Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := get_register(this, register)
 
-	after := before + get_register(this, register)
+	after := a + b
 
 	set_register(this, Register.A, after)
 
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, after < a)
 
 	this.clock += 4
 }
 
 add_hl :: proc(this: ^CPU, register: Wide_Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := read_from_memory(this, get_register(this, register))
 
-	after := before + read_from_memory(this, get_register(this, register))
+	after := a + b
 
 	set_register(this, Register.A, after)
 
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, after < a)
 
 	this.clock += 8
 }
@@ -1348,49 +1453,52 @@ adc :: proc {
 }
 
 adc_imm :: proc(this: ^CPU) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := fetch(this) + u8(get_flag(this, .C))
 
-	after := before + fetch(this) + u8(get_flag(this, .C))
+	res := a + b
 
-	set_register(this, Register.A, after)
+	set_register(this, Register.A, res)
 
 	//flags
-	set_flag(this, .Z, after == 0)
+	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, res < a)
 
 	this.clock += 8
 }
 
 adc_r :: proc(this: ^CPU, register: Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := get_register(this, register) + u8(get_flag(this, .C))
 
-	after := before + get_register(this, register) + u8(get_flag(this, .C))
+	after := a + b
 
 	set_register(this, Register.A, after)
 
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, after < a)
 
 	this.clock += 4
 }
 
 adc_hl :: proc(this: ^CPU, register: Wide_Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := read_from_memory(this, get_register(this, register)) + u8(get_flag(this, .C))
 
-	after := before + read_from_memory(this, get_register(this, register)) + u8(get_flag(this, .C))
+	after := a + b
 
 	set_register(this, Register.A, after)
 
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, after < a)
 
 	this.clock += 8
 }
@@ -1406,44 +1514,48 @@ cpl :: proc(this: ^CPU) {
 	this.clock += 4
 }
 
+ccf :: proc(this: ^CPU) {
+
+	cy := get_flag(this, .C)
+
+	set_flag(this, .N, false)
+	set_flag(this, .H, false)
+	set_flag(this, .C, cy ~ true)
+
+	this.clock += 4
+}
+
 daa :: proc(this: ^CPU) {
-	/*
-    // note: assumes a is a uint8_t and wraps from 0xff to 0
-    if (!n_flag) {  // after an addition, adjust if (half-)carry occurred or if result is out of bounds
-        if (c_flag || a > 0x99) { a += 0x60; c_flag = 1; }
-        if (h_flag || (a & 0x0f) > 0x09) { a += 0x6; }
-    } else {  // after a subtraction, only adjust if (half-)carry occurred
-        if (c_flag) { a -= 0x60; }
-        if (h_flag) { a -= 0x6; }
-    }
-    // these flags are always updated
-    z_flag = (a == 0); // the usual z flag
-    h_flag = 0; // h flag is always cleared
-    */
 
 	a := get_register(this, Register.A)
 
-	if (!get_flag(this, .N)) { 	// after an addition, adjust if (half-)carry occurred or if result is out of bounds
+	carry := false
+
+	if !get_flag(this, .N) {
 		if (get_flag(this, .C) || a > 0x99) {
 			a += 0x60
-			set_flag(this, .C, true)
+			carry = true
 		}
-		if (get_flag(this, .H) || a & 0x0F > 0x09) { 	// after a subtraction, only adjust if (half-)carry occurred
+		if (get_flag(this, .H) || ((a & 0x0F) > 0x09)) {
 			a += 0x06
 		}
-	} else {
-		if (get_flag(this, .C)) {
-			a -= 0x60
+	} else if get_flag(this, .C) {
+		carry = true
+		if get_flag(this, .H) {
+			a += 0x9A
+		} else {
+			a += 0xA0
 		}
-		if (get_flag(this, .H)) {
-			a -= 0x06
-		}
+	} else if get_flag(this, .H) {
+		a += 0xFA
 	}
+	set_register(this, Register.A, a)
 
 	set_flag(this, .Z, a == 0)
 	set_flag(this, .H, false)
+	set_flag(this, .C, carry)
 
-	set_register(this, Register.A, a)
+	this.clock += 4
 }
 
 sub :: proc {
@@ -1452,33 +1564,35 @@ sub :: proc {
 }
 
 sub_r :: proc(this: ^CPU, register: Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := get_register(this, register)
 
-	after := before - get_register(this, register)
+	res := a - b
 
-	set_register(this, Register.A, after)
+	set_register(this, Register.A, res)
 
 	//flags
-	set_flag(this, .Z, after == 0)
+	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) - (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, a < res)
 
 	this.clock += 4
 }
 
 sub_hl :: proc(this: ^CPU, register: Wide_Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := read_from_memory(this, get_register(this, register))
 
-	after := before - read_from_memory(this, get_register(this, register))
+	res := a - b
 
-	set_register(this, Register.A, after)
+	set_register(this, Register.A, res)
 
 	//flags
-	set_flag(this, .Z, after == 0)
+	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) - (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, a < res)
 
 	this.clock += 8
 }
@@ -1490,49 +1604,52 @@ sbc :: proc {
 }
 
 sbc_n :: proc(this: ^CPU) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := fetch(this) - u8(get_flag(this, .C))
 
-	after := before - fetch(this) - u8(get_flag(this, .C))
+	res := a - b
 
-	set_register(this, Register.A, after)
+	set_register(this, Register.A, res)
 
 	//flags
-	set_flag(this, .Z, after == 0)
+	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) - (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, res > a)
 
 	this.clock += 8
 }
 
 sbc_r :: proc(this: ^CPU, register: Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := get_register(this, register) - u8(get_flag(this, .C))
 
-	after := before - get_register(this, register) - u8(get_flag(this, .C))
+	res := a - b
 
-	set_register(this, Register.A, after)
+	set_register(this, Register.A, res)
 
 	//flags
-	set_flag(this, .Z, after == 0)
+	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) - (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, res > a)
 
 	this.clock += 4
 }
 
 sbc_hl :: proc(this: ^CPU, register: Wide_Register) {
-	before := get_register(this, Register.A)
+	a := get_register(this, Register.A)
+	b := read_from_memory(this, get_register(this, register)) - u8(get_flag(this, .C))
 
-	after := before - read_from_memory(this, get_register(this, register)) - u8(get_flag(this, .C))
+	res := a - b
 
-	set_register(this, Register.A, after)
+	set_register(this, Register.A, res)
 
 	//flags
-	set_flag(this, .Z, after == 0)
+	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, res > a)
 
 	this.clock += 8
 }
@@ -1547,24 +1664,24 @@ add_imm :: proc(this: ^CPU, register: Register, value: u8) {
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) + (value & 0xf)) & 0x10) == 0x10)
 	set_flag(this, .C, after < before)
 
 	this.clock += 8
 }
 
 sub_imm :: proc(this: ^CPU, register: Register, value: u8) {
-	before := get_register(this, register)
+	a := get_register(this, register)
 
-	after := before - value
+	res := a - value
 
-	set_register(this, register, after)
+	set_register(this, register, res)
 
 	//flags
-	set_flag(this, .Z, after == 0)
-	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (after & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .Z, res == 0)
+	set_flag(this, .N, true)
+	set_flag(this, .H, (((a & 0xf) - (value & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .C, a < res)
 
 	this.clock += 8
 }
@@ -1663,8 +1780,9 @@ xor_r :: proc(this: ^CPU, register: Register) {
 
 xor_hl :: proc(this: ^CPU, register: Wide_Register) {
 	before := get_register(this, Register.A)
+	r := read_from_memory(this, get_register(this, register))
 
-	after := before ~ read_from_memory(this, get_register(this, register))
+	after := before ~ r
 
 	set_register(this, Register.A, after)
 
@@ -1761,7 +1879,7 @@ cp_imm :: proc(this: ^CPU) {
 
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((res & 0xf) - (a & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((a & 0xf) - (n & 0xf)) & 0x10) == 0x10)
 	set_flag(this, .C, res > a)
 
 	this.clock += 8
@@ -1776,7 +1894,7 @@ cp_r :: proc(this: ^CPU, register: Register) {
 
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((res & 0xf) - (a & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((a & 0xf) - (r & 0xf)) & 0x10) == 0x10)
 	set_flag(this, .C, res > a)
 
 	this.clock += 4
@@ -1791,7 +1909,7 @@ cp_hl :: proc(this: ^CPU, register: Wide_Register) {
 
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((res & 0xf) - (a & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((a & 0xf) - (r & 0xf)) & 0x10) == 0x10)
 	set_flag(this, .C, res > a)
 
 	this.clock += 8
@@ -1812,7 +1930,7 @@ dec_r :: proc(this: ^CPU, register: Register) {
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
 
 	this.clock += 4
 }
@@ -1838,7 +1956,7 @@ dec_ind :: proc(this: ^CPU, register: Wide_Register) {
 
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
 
 	this.clock += 12
 }
@@ -1857,7 +1975,7 @@ inc_r :: proc(this: ^CPU, register: Register) {
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
 
 	this.clock += 4
 }
@@ -1868,7 +1986,7 @@ inc_rr :: proc(this: ^CPU, register: Wide_Register) {
 
 	set_register(this, register, after)
 
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
 
 	this.clock += 8
 }
@@ -1881,7 +1999,7 @@ inc_ind :: proc(this: ^CPU, register: Wide_Register) {
 
 	write_to_memory(this, address, after)
 
-	set_flag(this, .H, (((before & 0xf) - (after & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
 
 	this.clock += 8
 }
@@ -1891,10 +2009,11 @@ inc_ind :: proc(this: ^CPU, register: Wide_Register) {
 rla :: proc(this: ^CPU) {
 
 	a := get_register(this, Register.A)
+	carry := u8(get_flag(this, .C) ? 1 : 0)
 
 	old_7 := a & 0x80
 
-	rot := a << 1
+	rot := a << 1 | carry
 
 	set_register(this, Register.A, rot)
 
@@ -1910,9 +2029,11 @@ rra :: proc(this: ^CPU) {
 
 	a := get_register(this, Register.A)
 
+	carry := u8(get_flag(this, .C) ? 1 : 0)
+
 	old_0 := a & 0x01
 
-	rot := a >> 1
+	rot := a >> 1 | (carry << 7)
 
 	set_register(this, Register.A, rot)
 
@@ -1961,7 +2082,7 @@ rrca :: proc(this: ^CPU) {
 
 //Single-bit Operation instructions
 
-prefix_cb :: proc(this: ^CPU) {
+prefix_cb :: proc(this: ^CPU) -> bool {
 	opcode := fetch(this)
 
 	switch opcode {
@@ -1978,7 +2099,8 @@ prefix_cb :: proc(this: ^CPU) {
 		rlc(this, Register.H)
 	case 0x05:
 		rlc(this, Register.L)
-	//case 0x06: rl(this, Wide_Register.HL)
+	case 0x06:
+		rlc(this, Wide_Register.HL)
 	case 0x07:
 		rlc(this, Register.A)
 
@@ -1994,7 +2116,8 @@ prefix_cb :: proc(this: ^CPU) {
 		rrc(this, Register.H)
 	case 0x0D:
 		rrc(this, Register.L)
-	//case 0x0E: rr(this, Wide_Register.HL)
+	case 0x0E:
+		rrc(this, Wide_Register.HL)
 	case 0x0F:
 		rrc(this, Register.A)
 
@@ -2510,7 +2633,9 @@ prefix_cb :: proc(this: ^CPU) {
 
 	case:
 		fmt.eprintf("Unhandled Prefix CB code: %2x\n", opcode)
+		return false
 	}
+	return true
 }
 
 bit :: proc {
@@ -2552,22 +2677,11 @@ res :: proc {
 
 res_narrow :: proc(this: ^CPU, bit: u8, register: Register) {
 
-	switch register {
-	case .A:
-		this.AF &= ~(1 << (8 + bit))
-	case .B:
-		this.BC &= ~(1 << (8 + bit))
-	case .C:
-		this.BC &= ~(1 << bit)
-	case .D:
-		this.DE &= ~(1 << (8 + bit))
-	case .E:
-		this.DE &= ~(1 << bit)
-	case .H:
-		this.HL &= ~(1 << (8 + bit))
-	case .L:
-		this.HL &= ~(1 << bit)
-	}
+	r := get_register(this, register)
+
+	val := r & ~(1 << bit)
+
+	set_register(this, register, val)
 
 	this.clock += 8
 }
@@ -2584,7 +2698,12 @@ res_wide :: proc(this: ^CPU, bit: u8, register: Wide_Register) {
 	this.clock += 16
 }
 
-rlc :: proc(this: ^CPU, register: Register) {
+rlc :: proc {
+	rlc_n,
+	rlc_w,
+}
+
+rlc_n :: proc(this: ^CPU, register: Register) {
 
 	a := get_register(this, register)
 
@@ -2601,7 +2720,31 @@ rlc :: proc(this: ^CPU, register: Register) {
 	this.clock += 8
 }
 
-rrc :: proc(this: ^CPU, register: Register) {
+rlc_w :: proc(this: ^CPU, register: Wide_Register) {
+
+	address := get_register(this, register)
+
+	a := read_from_memory(this, address)
+
+	msb := a & 0b10000000
+	rot := (a << 1) | (a >> 7)
+
+	write_to_memory(this, address, rot)
+
+	set_flag(this, .Z, rot == 0)
+	set_flag(this, .N, false)
+	set_flag(this, .H, false)
+	set_flag(this, .C, msb > 0)
+
+	this.clock += 16
+}
+
+rrc :: proc {
+	rrc_n,
+	rrc_w,
+}
+
+rrc_n :: proc(this: ^CPU, register: Register) {
 
 	a := get_register(this, register)
 
@@ -2609,6 +2752,25 @@ rrc :: proc(this: ^CPU, register: Register) {
 	rot := (a >> 1) | (a << 7)
 
 	set_register(this, register, rot)
+
+	set_flag(this, .Z, rot == 0)
+	set_flag(this, .N, false)
+	set_flag(this, .H, false)
+	set_flag(this, .C, lsb > 0)
+
+	this.clock += 8
+}
+
+rrc_w :: proc(this: ^CPU, register: Wide_Register) {
+
+	address := get_register(this, register)
+
+	a := read_from_memory(this, address)
+
+	lsb := a & 0b00000001
+	rot := (a >> 1) | (a << 7)
+
+	write_to_memory(this, address, rot)
 
 	set_flag(this, .Z, rot == 0)
 	set_flag(this, .N, false)
@@ -2685,7 +2847,7 @@ rr_n :: proc(this: ^CPU, register: Register) {
 	set_register(this, register, res)
 	carry = lsb > 0
 
-	set_flag(this, .Z, res == 0)
+	set_flag(this, .Z, false)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
 	set_flag(this, .C, carry)
@@ -2708,7 +2870,7 @@ rr_hl :: proc(this: ^CPU, register: Wide_Register) {
 	write_to_memory(this, address, res)
 	carry = lsb > 0
 
-	set_flag(this, .Z, res == 0)
+	set_flag(this, .Z, false)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
 	set_flag(this, .C, carry)
@@ -2719,6 +2881,7 @@ rr_hl :: proc(this: ^CPU, register: Wide_Register) {
 set_bit :: proc {
 	set_bit_r,
 	set_bit_rr,
+	set_bit_common,
 }
 
 set_bit_r :: proc(this: ^CPU, bit: u8, register: Register) {
@@ -2760,7 +2923,7 @@ srl_n :: proc(this: ^CPU, register: Register) {
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
-	set_flag(this, .C, false)
+	set_flag(this, .C, res < r)
 
 	set_register(this, register, res)
 
@@ -2777,7 +2940,7 @@ srl_hl :: proc(this: ^CPU, register: Wide_Register) {
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
-	set_flag(this, .C, false)
+	set_flag(this, .C, res < value)
 
 	write_to_memory(this, address, res)
 

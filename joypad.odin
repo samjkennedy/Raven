@@ -74,6 +74,8 @@ handle_button :: proc {
 
 handle_button_dir :: proc(button: Direction_Button, cpu: ^CPU, released: bool) {
 
+	cpu.is_stopped = false
+
 	joypad_ram := read_from_memory(cpu, JOYPAD_ADDRESS)
 	already_pressed := joypad_state.direction_buttons & (1 << u8(button)) == 0
 
@@ -87,6 +89,8 @@ handle_button_dir :: proc(button: Direction_Button, cpu: ^CPU, released: bool) {
 }
 
 handle_button_act :: proc(button: Action_Button, cpu: ^CPU, released: bool) {
+
+	cpu.is_stopped = false
 
 	joypad_ram := read_from_memory(cpu, JOYPAD_ADDRESS)
 	already_pressed := joypad_state.action_buttons & (1 << u8(button)) == 0
