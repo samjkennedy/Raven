@@ -1,6 +1,7 @@
 package raven
 
 import "vendor:sdl2"
+import "vendor:sdl2/image"
 
 import "core:fmt"
 import "core:os"
@@ -18,7 +19,7 @@ Emulator :: struct {
 
 WIDTH :: i32(160)
 HEIGHT :: i32(144)
-SCALE :: i32(2)
+SCALE :: i32(3)
 
 init_window :: proc(emulator: ^Emulator) -> bool { 	//TODO: Return window handle
 	WINDOW_WIDTH :: WIDTH * SCALE
@@ -40,6 +41,17 @@ init_window :: proc(emulator: ^Emulator) -> bool { 	//TODO: Return window handle
 		fmt.println("sdl2.CreateWindow failed.")
 		return false
 	}
+
+	rwops := sdl2.RWFromFile("resources/img/icon.png", "rb")
+	initted := image.Init(image.INIT_PNG)
+	if initted != image.INIT_PNG {
+		fmt.printf("sdl2/image.Init failed: %v\n", image.GetError())
+		return false
+	}
+	icon := image.LoadPNG_RW(rwops)
+
+	sdl2.SetWindowIcon(emulator.window, icon)
+
 	emulator.renderer = sdl2.CreateRenderer(emulator.window, -1, {.ACCELERATED, .PRESENTVSYNC})
 	if emulator.renderer == nil {
 		fmt.println("sdl2.CreateRenderer failed.")
@@ -198,7 +210,7 @@ main :: proc() {
 	//init_vram_window(&debugger)
 
 	//append(&debugger.break_points, 0xc051) //Write to FF80
-	//append(&debugger.break_points, 0xc05a) //Test 04 last progress
+	//append(&debugger.break_points, 0xC464) //Test 04 last progress
 
 	run(&emulator, &ppu, &debugger)
 }

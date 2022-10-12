@@ -30,7 +30,7 @@ CPU :: struct {
 	echoed_ram:   [0x2000]u8, //E000-FDFF
 	//WRAM
 	ram:          [0x2000]u8, //C000-DFFF
-
+	external_ram: [0x2000]u8, //A000-BFFF
 	//Video RAM
 	vram:         [0x2000]u8, //8000-9FFF
 	cart:         ^Cart, //0000-4000/8000
@@ -77,12 +77,9 @@ TAC_REGISTER: u16 : 0xFF07
 
 write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 
-	//determine where we're writing
-	if (address == 0xff80) {
-		//fmt.println("Blocking write to 0xFF80 - tetris hack")
-		return
-	}
+	//fmt.printf("Writing %2x to %4x\n", value, address)
 
+	//determine where we're writing
 	switch address {
 	case IE_REGISTER:
 		{
@@ -140,7 +137,9 @@ write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 			this.io_ports[address - 0xFF00] = _value
 		}
 	case 0xFEA0 ..< 0xFF00:
-		{} 	//Not usable
+		{
+			//Not usable
+		}
 	case 0xFE00 ..< 0xFEA0:
 		{
 			this.oam[address - 0xFE00] = value
@@ -154,6 +153,10 @@ write_to_memory :: proc(this: ^CPU, address: u16, value: u8) {
 		{
 			this.ram[address - 0xC000] = value
 			this.echoed_ram[address - 0xC000] = value
+		}
+	case 0xA000 ..< 0xC000:
+		{
+			this.external_ram[address - 0xA000] = value
 		}
 	case 0x8000 ..< 0xA000:
 		{
@@ -194,7 +197,9 @@ read_from_memory :: proc(this: ^CPU, address: u16) -> (value: u8) {
 			}
 		}
 	case 0xFEA0 ..< 0xFF00:
-		{} 	//Not usable
+		{
+			//Not usable
+		}
 	case 0xFE00 ..< 0xFEA0:
 		{
 			value = this.oam[address - 0xFE00]
@@ -206,6 +211,10 @@ read_from_memory :: proc(this: ^CPU, address: u16) -> (value: u8) {
 	case 0xC000 ..< 0xE000:
 		{
 			value = this.ram[address - 0xC000]
+		}
+	case 0xA000 ..< 0xC000:
+		{
+			value = this.external_ram[address - 0xA000]
 		}
 	case 0x8000 ..< 0xA000:
 		{
@@ -228,8 +237,6 @@ run_dma_transfer :: proc(this: ^CPU, value: u8) {
 
 		address := source + offset
 		val := read_from_memory(this, address)
-
-		//fmt.printf("Writing %2x from %4x to %4x\n", val, source, 0xFE00 + offset)
 
 		write_to_memory(this, 0xFE00 + offset, val)
 	}
@@ -279,6 +286,7 @@ Register :: enum u8 {
 	C,
 	D,
 	E,
+	F,
 	H,
 	L,
 }
@@ -357,6 +365,8 @@ get_narrow_register :: proc(this: ^CPU, register: Register) -> u8 {
 		value = u8(this.DE >> 8)
 	case .E:
 		value = u8(this.DE & 0x00FF)
+	case .F:
+		value = u8(this.AF & 0x00FF)
 	case .H:
 		value = u8(this.HL >> 8)
 	case .L:
@@ -391,6 +401,11 @@ set_narrow_register :: proc(this: ^CPU, register: Register, value: u8) {
 		{
 			this.DE &= ~u16(0x00FF)
 			this.DE |= (u16(value))
+		}
+	case .F:
+		{
+			this.AF &= ~u16(0x00FF)
+			this.AF |= (u16(value))
 		}
 	case .H:
 		{
@@ -459,7 +474,7 @@ run_instruction :: proc(this: ^CPU) -> (ok: bool) {
 			case 0x07:
 				rlca(this)
 			case 0x08:
-				dec(this, Wide_Register.BC)
+				ld_sp(this)
 
 			case 0x09:
 				add(this, Wide_Register.HL, Wide_Register.BC)
@@ -1211,10 +1226,22 @@ ld_hl_sp_d8 :: proc(this: ^CPU) {
 
 	set_flag(this, .Z, false)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) + (u16(offset) & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < before)
+	set_flag(this, .H, ((this.sp ~ u16(offset) ~ after) & 0x10) == 0x10)
+	set_flag(this, .C, ((this.sp ~ u16(offset) ~ after) & 0x100) == 0x100)
 
 	this.clock += 12
+}
+
+ld_sp :: proc(this: ^CPU) {
+	lo := fetch(this)
+	hi := fetch(this)
+
+	address := (u16(hi) << 8 | u16(lo))
+
+	write_to_memory(this, address, u8(this.sp & 0x00FF))
+	write_to_memory(this, address + 1, u8((this.sp & 0xFF00) >> 8))
+
+	this.clock += 20
 }
 
 ld_wide_imm :: proc(this: ^CPU, register: Wide_Register) {
@@ -1246,7 +1273,10 @@ ld_n :: proc(this: ^CPU, r: Register) {
 
 ld_wide :: proc(this: ^CPU, destination: Wide_Register, source: Register) {
 
-	write_to_memory(this, get_register(this, destination), get_register(this, source))
+	address := get_register(this, destination)
+	value := get_register(this, source)
+
+	write_to_memory(this, address, value)
 
 	this.clock += 8
 }
@@ -1391,7 +1421,7 @@ add_sp_r8 :: proc(this: ^CPU) {
 	set_flag(this, .Z, false)
 	set_flag(this, .N, false)
 	set_flag(this, .H, (((before & 0xf) + (u16(offset) & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, this.sp < before)
+	set_flag(this, .C, this.sp & 0x00FF < before & 0x00FF)
 
 	this.clock += 16
 }
@@ -1404,9 +1434,8 @@ add_w_w :: proc(this: ^CPU, r1: Wide_Register, r2: Wide_Register) {
 
 	set_register(this, r1, after)
 
-	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (a & 0xfff) + (b & 0xfff) > 0xfff)
 	set_flag(this, .C, after < a)
 
 	this.clock += 8
@@ -1454,51 +1483,51 @@ adc :: proc {
 
 adc_imm :: proc(this: ^CPU) {
 	a := get_register(this, Register.A)
-	b := fetch(this) + u8(get_flag(this, .C))
+	b := fetch(this)
 
-	res := a + b
+	res := a + b + u8(get_flag(this, .C))
 
 	set_register(this, Register.A, res)
 
 	//flags
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, res < a)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) + u8(get_flag(this, .C)) > 0xF))
+	set_flag(this, .C, res <= a && b > 0)
 
 	this.clock += 8
 }
 
 adc_r :: proc(this: ^CPU, register: Register) {
 	a := get_register(this, Register.A)
-	b := get_register(this, register) + u8(get_flag(this, .C))
+	b := get_register(this, register)
 
-	after := a + b
+	after := a + b + u8(get_flag(this, .C))
 
 	set_register(this, Register.A, after)
 
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < a)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) + u8(get_flag(this, .C)) > 0xF))
+	set_flag(this, .C, after <= a && b > 0)
 
 	this.clock += 4
 }
 
 adc_hl :: proc(this: ^CPU, register: Wide_Register) {
 	a := get_register(this, Register.A)
-	b := read_from_memory(this, get_register(this, register)) + u8(get_flag(this, .C))
+	b := read_from_memory(this, get_register(this, register))
 
-	after := a + b
+	after := a + b + u8(get_flag(this, .C))
 
 	set_register(this, Register.A, after)
 
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, after < a)
+	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) + u8(get_flag(this, .C)) > 0xF))
+	set_flag(this, .C, after <= a && b > 0)
 
 	this.clock += 8
 }
@@ -1605,51 +1634,51 @@ sbc :: proc {
 
 sbc_n :: proc(this: ^CPU) {
 	a := get_register(this, Register.A)
-	b := fetch(this) - u8(get_flag(this, .C))
+	b := fetch(this)
 
-	res := a - b
+	res := a - b - u8(get_flag(this, .C))
 
 	set_register(this, Register.A, res)
 
 	//flags
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((a & 0xf) - (b & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, res > a)
+	set_flag(this, .H, (((a & 0xf) - (b & 0xf) - u8(get_flag(this, .C))) & 0x10) == 0x10)
+	set_flag(this, .C, res >= a && (b > 0 || u8(get_flag(this, .C)) > 0))
 
 	this.clock += 8
 }
 
 sbc_r :: proc(this: ^CPU, register: Register) {
 	a := get_register(this, Register.A)
-	b := get_register(this, register) - u8(get_flag(this, .C))
+	b := get_register(this, register)
 
-	res := a - b
+	res := a - b - u8(get_flag(this, .C))
 
 	set_register(this, Register.A, res)
 
 	//flags
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((a & 0xf) - (b & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, res > a)
+	set_flag(this, .H, (((a & 0xf) - (b & 0xf) - u8(get_flag(this, .C))) & 0x10) == 0x10)
+	set_flag(this, .C, res >= a && (b > 0 || u8(get_flag(this, .C)) > 0))
 
 	this.clock += 4
 }
 
 sbc_hl :: proc(this: ^CPU, register: Wide_Register) {
 	a := get_register(this, Register.A)
-	b := read_from_memory(this, get_register(this, register)) - u8(get_flag(this, .C))
+	b := read_from_memory(this, get_register(this, register))
 
-	res := a - b
+	res := a - b - u8(get_flag(this, .C))
 
 	set_register(this, Register.A, res)
 
 	//flags
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, true)
-	set_flag(this, .H, (((a & 0xf) + (b & 0xf)) & 0x10) == 0x10)
-	set_flag(this, .C, res > a)
+	set_flag(this, .H, (((a & 0xf) - (b & 0xf)) - u8(get_flag(this, .C)) > 0xF))
+	set_flag(this, .C, res >= a && (b > 0 || u8(get_flag(this, .C)) > 0))
 
 	this.clock += 8
 }
@@ -1975,7 +2004,7 @@ inc_r :: proc(this: ^CPU, register: Register) {
 	//flags
 	set_flag(this, .Z, after == 0)
 	set_flag(this, .N, false)
-	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .H, (((before & 0xf) + (1 & 0xf)) & 0x10) == 0x10)
 
 	this.clock += 4
 }
@@ -1985,8 +2014,6 @@ inc_rr :: proc(this: ^CPU, register: Wide_Register) {
 	after := before + u16(1)
 
 	set_register(this, register, after)
-
-	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
 
 	this.clock += 8
 }
@@ -1999,9 +2026,11 @@ inc_ind :: proc(this: ^CPU, register: Wide_Register) {
 
 	write_to_memory(this, address, after)
 
-	set_flag(this, .H, (((before & 0xf) - (1 & 0xf)) & 0x10) == 0x10)
+	set_flag(this, .Z, after == 0)
+	set_flag(this, .N, false)
+	set_flag(this, .H, (((before & 0xf) + (1 & 0xf)) & 0x10) == 0x10)
 
-	this.clock += 8
+	this.clock += 12
 }
 
 //Rotate and Shift instructions
@@ -2647,7 +2676,7 @@ bit_narrow :: proc(this: ^CPU, bit: u8, register: Register) {
 
 	r := get_register(this, register)
 
-	b := r & 1 << bit
+	b := r & (1 << bit)
 
 	set_flag(this, .Z, b == 0)
 	set_flag(this, .N, false)
@@ -2661,7 +2690,7 @@ bit_wide :: proc(this: ^CPU, bit: u8, register: Wide_Register) {
 	address := get_register(this, register)
 	r := read_from_memory(this, address)
 
-	b := r & 1 << bit
+	b := r & (1 << bit)
 
 	set_flag(this, .Z, b == 0)
 	set_flag(this, .N, false)
@@ -2777,7 +2806,7 @@ rrc_w :: proc(this: ^CPU, register: Wide_Register) {
 	set_flag(this, .H, false)
 	set_flag(this, .C, lsb > 0)
 
-	this.clock += 8
+	this.clock += 16
 }
 
 rl :: proc {
@@ -2923,7 +2952,7 @@ srl_n :: proc(this: ^CPU, register: Register) {
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
-	set_flag(this, .C, res < r)
+	set_flag(this, .C, r & 1 == 1)
 
 	set_register(this, register, res)
 
@@ -2940,7 +2969,7 @@ srl_hl :: proc(this: ^CPU, register: Wide_Register) {
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
-	set_flag(this, .C, res < value)
+	set_flag(this, .C, value & 1 == 1)
 
 	write_to_memory(this, address, res)
 
@@ -2965,7 +2994,7 @@ sla_n :: proc(this: ^CPU, register: Register) {
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
-	set_flag(this, .C, res > r)
+	set_flag(this, .C, msb > 0)
 
 	this.clock += 8
 }
@@ -2984,7 +3013,7 @@ sla_hl :: proc(this: ^CPU, register: Wide_Register) {
 	set_flag(this, .Z, res == 0)
 	set_flag(this, .N, false)
 	set_flag(this, .H, false)
-	set_flag(this, .C, res > value)
+	set_flag(this, .C, msb > 0)
 
 	this.clock += 16
 }

@@ -129,6 +129,8 @@ lookup :: proc(ins: [3]u8, cpu: ^CPU) -> (op: string) {
 		return fmt.aprintf("LD B, %2x", ins[1])
 	case 0x07:
 		return "RLCA"
+	case 0x08:
+		return fmt.aprintf("LD (%4x), SP", concat(ins[1], ins[2]))
 	case 0x09:
 		return "ADD HL, BC"
 	case 0x0A:
@@ -171,6 +173,8 @@ lookup :: proc(ins: [3]u8, cpu: ^CPU) -> (op: string) {
 		return "LD (HL+), A"
 	case 0x23:
 		return "INC HL"
+	case 0x26:
+		return fmt.aprintf("LD H, %2x", ins[1])
 	case 0x28:
 		return fmt.aprintf("JP Z, %2x", ins[1])
 	case 0x2A:
@@ -188,6 +192,8 @@ lookup :: proc(ins: [3]u8, cpu: ^CPU) -> (op: string) {
 		return fmt.aprintf("JR NC, %2x", ins[1])
 	case 0x32:
 		return "LD (HL-), A"
+	case 0x34:
+		return "INC (HL)"
 	case 0x36:
 		return fmt.aprintf("LD (HL), %2x", ins[1])
 	case 0x38:
@@ -499,6 +505,8 @@ lookup :: proc(ins: [3]u8, cpu: ^CPU) -> (op: string) {
 		return "PUSH HL"
 	case 0xE6:
 		return fmt.aprintf("AND %2x", ins[1])
+	case 0xE8:
+		return fmt.aprintf("ADD SP, %2x", ins[1])
 	case 0xEA:
 		return fmt.aprintf("LD (%4x), a", concat(ins[1], ins[2]))
 	case 0xEF:
